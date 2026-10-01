@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>f(x) market</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=STIX+Two+Text:ital,wght@1,400;1,500&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- Login view: shown when there's no saved session. -->
+  <main id="login-view" class="login hidden">
+    <h1><span class="math">f</span>(<span class="math">x</span>) = ?</h1>
+    <p class="lead">Find what the black box is made of. Bet on what everyone else finds.</p>
+    <form id="login-form" class="card">
+      <label for="code-input">Your code</label>
+      <input id="code-input" class="code-input" name="code" autocomplete="off" autocapitalize="characters"
+             spellcheck="false" maxlength="12" required>
+      <button type="submit" class="btn-ink">Join the game</button>
+      <p id="login-error" class="form-error" role="alert"></p>
+    </form>
+  </main>
+
+  <!-- Game view: shown once logged in. -->
+  <div id="game-view" class="hidden">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand"><span class="math">f</span>(<span class="math">x</span>) market</div>
+        <div class="topbar-spacer"></div>
+        <div class="wallet">
+          <div class="wallet-text">
+            <div id="wallet-name" class="wallet-name"></div>
+            <div class="wallet-balance"><span id="wallet-balance">0</span> <small>coins</small></div>
+            <div id="wallet-left" class="wallet-left"></div>
+          </div>
+          <button id="logout" class="btn-quiet" type="button">Log out</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page">
+      <p id="paused-banner" class="banner hidden">
+        The game is paused. You can look around, but posting and voting are off.
+      </p>
+
+      <div class="layout">
+        <section>
+          <form id="post-form" class="card post-box">
+            <label for="formula-input">Post a feature</label>
+            <div class="post-row">
+              <input id="formula-input" class="formula-input" placeholder="x^2 + 3*sin(x)" autocomplete="off"
+                     spellcheck="false" maxlength="200">
+              <button id="post-button" type="submit" class="btn-ink">Post</button>
+            </div>
+            <p id="post-hint" class="hint"></p>
+            <p id="post-error" class="form-error" role="alert"></p>
+          </form>
+
+          <div class="filters" role="group" aria-label="Filter features">
+            <button type="button" class="chip" data-filter="all" aria-pressed="true">All</button>
+            <button type="button" class="chip" data-filter="open" aria-pressed="false">Open</button>
+            <button type="button" class="chip" data-filter="judged" aria-pressed="false">Judged</button>
+            <button type="button" class="chip" data-filter="mine" aria-pressed="false">Mine</button>
+          </div>
+
+          <div id="feature-list" class="feature-list"></div>
+        </section>
+
+        <aside class="sidebar">
+          <div class="card leaderboard">
+            <h2>Leaderboard</h2>
+            <ol id="leaderboard"></ol>
+          </div>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

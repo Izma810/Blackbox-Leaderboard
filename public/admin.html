@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>f(x) market admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=STIX+Two+Text:ital,wght@1,400;1,500&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span class="math">f</span>(<span class="math">x</span>) market admin</div>
+      <div class="topbar-spacer"></div>
+      <a class="btn-quiet" href="/">Player page</a>
+    </div>
+  </header>
+
+  <main class="page panels">
+    <!-- 1. Admin key -->
+    <section class="card panel">
+      <h2>Admin key</h2>
+      <form id="key-form" class="row">
+        <input id="key-input" type="password" autocomplete="current-password" placeholder="Admin key"
+               aria-label="Admin key" style="flex:1; min-width: 12rem">
+        <button type="submit" class="btn-ink">Connect</button>
+      </form>
+      <p id="key-status" class="hint"></p>
+      <p id="key-error" class="form-error" role="alert"></p>
+    </section>
+
+    <div id="admin-panels" class="panels hidden">
+      <!-- 2. Game status -->
+      <section class="card panel">
+        <h2>Game status</h2>
+        <p id="status-line" style="margin-bottom: 0.75rem"></p>
+        <div class="row">
+          <button id="open-game" type="button" class="btn-ink">Open the game</button>
+          <button id="pause-game" type="button" class="btn">Pause the game</button>
+        </div>
+        <p id="status-error" class="form-error" role="alert"></p>
+      </section>
+
+      <!-- 3. Settings -->
+      <section class="card panel">
+        <h2>Settings</h2>
+        <form id="settings-form">
+          <div id="settings-grid" class="settings-grid"></div>
+          <button type="submit" class="btn-ink">Save settings</button>
+          <p id="settings-error" class="form-error" role="alert"></p>
+        </form>
+      </section>
+
+      <!-- 4. Players -->
+      <section class="card panel">
+        <h2>Add players</h2>
+        <label for="names-input">One name per line</label>
+        <textarea id="names-input" spellcheck="false"></textarea>
+        <div class="row" style="margin-top: 0.6rem">
+          <button id="add-players" type="button" class="btn-ink">Add players</button>
+          <button id="download-codes" type="button" class="btn">Download all codes (CSV)</button>
+        </div>
+        <p id="players-error" class="form-error" role="alert"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Name</th><th>Code</th><th class="num">Balance</th><th class="num">Posts used</th><th class="num">Votes used</th></tr>
+            </thead>
+            <tbody id="players-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 5. Judging -->
+      <section class="card panel">
+        <h2>Judge features</h2>
+        <div id="judge-area" class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>#</th><th>Formula</th><th>By</th><th class="num">Up</th><th class="num">Down</th><th>Status</th><th>Reward y</th><th></th></tr>
+            </thead>
+            <tbody id="features-body"></tbody>
+          </table>
+        </div>
+        <p id="judge-error" class="form-error" role="alert"></p>
+      </section>
+
+      <!-- 6. Audit and backup -->
+      <section class="card panel">
+        <h2>Money check and backup</h2>
+        <div class="row">
+          <button id="run-audit" type="button" class="btn-ink">Run money check</button>
+          <button id="download-backup" type="button" class="btn">Download full backup (JSON)</button>
+        </div>
+        <p id="audit-line" style="margin-top: 0.75rem"></p>
+        <pre id="audit-output" class="audit hidden"></pre>
+        <p id="audit-error" class="form-error" role="alert"></p>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/admin.js"></script>
+</body>
+</html>

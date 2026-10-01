@@ -1,0 +1,30 @@
+{
+  // Lets your editor check this file against wrangler's own rules.
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // The Worker's name on Cloudflare. Also the start of its workers.dev URL.
+  "name": "prediction-game",
+
+  // The front door Worker: every request starts here.
+  "main": "src/index.ts",
+
+  // Pins the Workers runtime behavior to this date so later platform changes don't surprise us.
+  "compatibility_date": "2026-09-01",
+
+  // Files in ./public (the player and admin pages) are served as-is.
+  "assets": { "directory": "./public" },
+
+  // Plain settings. Change GAME_NAME and redeploy to start a fresh, empty game.
+  "vars": { "GAME_NAME": "game-1" },
+
+  // Connects the name env.GAME in code to the Game Durable Object class.
+  "durable_objects": {
+    "bindings": [{ "name": "GAME", "class_name": "Game" }]
+  },
+
+  // Tells Cloudflare that Game is a new class that stores its data in SQLite.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Game"] }],
+
+  // Keeps logs so you can see errors in the Cloudflare dashboard.
+  "observability": { "enabled": true }
+}

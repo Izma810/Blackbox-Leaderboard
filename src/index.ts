@@ -1,116 +1,64 @@
-// The front door: turns HTTP requests into calls on the Game object and results back into JSON.
-// It holds no game data itself; all rules live in game.ts.
-import { Game } from "./game";
-import type { Env, Result } from "./types";
+import { Hono } from 'hono'
+import { cors } from 'hono/cors'
+import type { Env } from './types'
+import { roomsRouter } from './api/rooms'
+import { gameRouter } from './api/game'
+import { adminRouter } from './api/admin'
 
-type Body = Record<string, unknown>;
+// Re-export the Durable Object class — wrangler requires it as a named export
+export { GameRoomDO } from './durable-objects/GameRoomDO'
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json", "cache-control": "no-store" },
-  });
-}
+const app = new Hono<{ Bindings: Env }>()
 
-function respond<T>(result: Result<T>): Response {
-  if (result.ok) return json(result.data);
-  return json({ error: result.error }, result.status);
-}
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+app.use('*', cors({
+  origin: '*',
+  allowHeaders: ['Content-Type', 'Authorization'],
+  allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+}))
 
-// A broken or missing body is treated as empty, so the Game gives a friendly error instead.
-async function readBody(request: Request): Promise<Body> {
-  try {
-    const body = await request.json();
-    return body && typeof body === "object" && !Array.isArray(body) ? (body as Body) : {};
-  } catch {
-    return {};
-  }
-}
+// ─── WebSocket upgrade ────────────────────────────────────────────────────────
+// GET /ws?roomId=X&playerId=Y
+app.get('/ws', async (c) => {
+  const { roomId, playerId } = c.req.query()
 
-function bearerToken(request: Request): string {
-  const header = request.headers.get("authorization") ?? "";
-  return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
-}
-
-// Hashing both sides first makes them equal length, so the comparison takes the same time
-// whether the guess is close or not.
-async function isAdmin(request: Request, env: Env): Promise<boolean> {
-  const given = request.headers.get("x-admin-key") ?? "";
-  const expected = env.ADMIN_KEY ?? "";
-  if (given === "" || expected === "") return false;
-  const encoder = new TextEncoder();
-  const [a, b] = await Promise.all([
-    crypto.subtle.digest("SHA-256", encoder.encode(given)),
-    crypto.subtle.digest("SHA-256", encoder.encode(expected)),
-  ]);
-  return crypto.subtle.timingSafeEqual(a, b);
-}
-
-async function route(request: Request, env: Env, path: string): Promise<Response> {
-  const game = env.GAME.get(env.GAME.idFromName(env.GAME_NAME || "game-1"));
-  const method = request.method;
-
-  // ----- Player routes -----
-  if (method === "POST" && path === "/api/login") {
-    const body = await readBody(request);
-    return respond(await game.login(String(body.code ?? "")));
-  }
-  if (method === "GET" && path === "/api/state") {
-    return respond(await game.state(bearerToken(request)));
-  }
-  if (method === "POST" && path === "/api/features") {
-    const body = await readBody(request);
-    return respond(await game.postFeature(bearerToken(request), String(body.formula ?? "")));
-  }
-  if (method === "POST" && path === "/api/votes") {
-    const body = await readBody(request);
-    return respond(await game.vote(bearerToken(request), Number(body.featureId), String(body.direction ?? "")));
-  }
-  const history = /^\/api\/features\/(\d+)\/history$/.exec(path);
-  if (method === "GET" && history) {
-    return respond(await game.priceHistory(Number(history[1])));
+  if (!roomId || !playerId) {
+    return c.json({ error: 'Missing roomId or playerId query params' }, 400)
   }
 
-  // ----- Admin routes -----
-  if (path.startsWith("/api/admin/")) {
-    if (!(await isAdmin(request, env))) return json({ error: "Wrong admin key." }, 401);
+  // Validate that the player belongs to the room
+  const player = await c.env.DB
+    .prepare('SELECT id FROM players WHERE id = ? AND room_id = ?')
+    .bind(playerId, roomId)
+    .first()
 
-    if (method === "GET" && path === "/api/admin/settings") return respond(await game.adminSettings());
-    if (method === "POST" && path === "/api/admin/settings") {
-      return respond(await game.updateSettings(await readBody(request)));
-    }
-    if (method === "GET" && path === "/api/admin/players") return respond(await game.listPlayers());
-    if (method === "POST" && path === "/api/admin/players") {
-      const body = await readBody(request);
-      const names = Array.isArray(body.names) ? body.names.map((n) => String(n)) : [];
-      return respond(await game.addPlayers(names));
-    }
-    if (method === "GET" && path === "/api/admin/features") return respond(await game.adminFeatures());
-    if (method === "POST" && path === "/api/admin/judge") {
-      const body = await readBody(request);
-      // Only the literal true counts, so "false" or 1 can't accidentally pay out.
-      const correct = body.correct === true;
-      return respond(await game.judge(Number(body.featureId), correct, Number(body.payoutY)));
-    }
-    if (method === "GET" && path === "/api/admin/audit") return respond(await game.audit());
-    if (method === "GET" && path === "/api/admin/export") return respond(await game.exportAll());
+  if (!player) {
+    return c.json({ error: 'Player not found in this room' }, 404)
   }
 
-  return json({ error: "Not found" }, 404);
-}
+  // Forward the raw request unchanged to the DO.
+  // Do NOT reconstruct the Request — recreating it can drop hop-by-hop headers
+  // (Upgrade, Connection) which are required for the WebSocket handshake.
+  // roomId and playerId are already in the URL's search params so the DO can read them.
+  const doId = c.env.GAME_ROOM.idFromName(roomId)
+  const stub = c.env.GAME_ROOM.get(doId)
+  return stub.fetch(c.req.raw)
+})
 
-export default {
-  async fetch(request, env) {
-    const path = new URL(request.url).pathname;
-    // Real files in public/ are served before this code runs; anything else outside /api/ is missing.
-    if (!path.startsWith("/api/")) return new Response("Not found", { status: 404 });
-    try {
-      return await route(request, env, path);
-    } catch (err) {
-      console.error("Unexpected error in front door:", err);
-      return json({ error: "The server couldn't handle that request. Try again." }, 500);
-    }
-  },
-} satisfies ExportedHandler<Env>;
+// ─── REST API routes ──────────────────────────────────────────────────────────
+app.route('/api/rooms', roomsRouter)
+app.route('/api', gameRouter)
+app.route('/api', adminRouter)
 
-export { Game };
+// ─── Health check ─────────────────────────────────────────────────────────────
+app.get('/health', (c) => c.json({ ok: true, ts: Date.now() }))
+
+// ─── 404 fallback ─────────────────────────────────────────────────────────────
+app.notFound((c) => c.json({ error: 'Not found' }, 404))
+
+app.onError((err, c) => {
+  console.error('[Worker error]', err)
+  return c.json({ error: 'Internal server error' }, 500)
+})
+
+export default app

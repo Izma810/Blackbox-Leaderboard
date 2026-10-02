@@ -1,16 +1,20 @@
 {
-  "name": "prediction-game",
-  "version": "1.0.0",
+  "name": "blackbox-leaderboard",
+  "version": "0.0.1",
   "private": true,
-  "description": "Feature-guessing prediction market on Cloudflare Workers + Durable Objects",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check": "tsc --noEmit"
+    "db:migrate": "wrangler d1 execute blackbox-leaderboard --file=src/db/schema.sql",
+    "db:migrate:remote": "wrangler d1 execute blackbox-leaderboard --remote --file=src/db/schema.sql",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5",
-    "typescript": "^5",
-    "wrangler": "^4"
+    "@cloudflare/workers-types": "^4.20241022.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.78.0"
   }
 }

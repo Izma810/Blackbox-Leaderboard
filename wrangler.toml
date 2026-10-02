@@ -1,0 +1,22 @@
+name = "blackbox-leaderboard"
+main = "src/index.ts"
+compatibility_date = "2024-10-22"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoomDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GameRoomDO"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "blackbox-leaderboard"
+database_id = "placeholder-run-wrangler-d1-create"
+
+[vars]
+ENVIRONMENT = "development"
+# Override this for production with: wrangler secret put ADMIN_PASSWORD
+ADMIN_PASSWORD = "root"

@@ -1,15 +1,11 @@
-export type Phase = 'lobby' | 'submission' | 'voting' | 'results' | 'finished'
+// Mirror of the worker types — keep in sync with src/types.ts
 
-export type UnaryTransformKey =
-  | 'identity' | 'square' | 'cube' | 'sqrt' | 'abs'
-  | 'log' | 'log2' | 'reciprocal'
-  | 'sin' | 'cos' | 'sin_2pi' | 'cos_2pi' | 'sin_period7' | 'cos_period7'
-  | 'exp' | 'floor10' | 'step'
+export type Phase = 'lobby' | 'submission' | 'voting' | 'results' | 'finished'
 
 export type BinaryTransformKey = 'multiply' | 'divide' | 'add' | 'distance'
 
 export type Feature =
-  | string  // "identity:x"  |  "square:x1"  |  raw column "x"
+  | string
   | { binary: BinaryTransformKey; a: string; b: string }
 
 export interface RoomConfig {
@@ -53,7 +49,6 @@ export interface Round {
 export interface PublicSubmission {
   id: string
   playerId: string
-  /** username when named, "A"/"B"/"C" when anonymous */
   label: string
   features: Feature[]
   submittedAt: number
@@ -92,7 +87,28 @@ export interface LeaderboardEntry {
   totalScore: number
 }
 
-/** Puzzle data that is safe to send to players (no solution). */
+export interface RoomState {
+  room: Room
+  players: PlayerInfo[]
+  currentRound: Round | null
+  submissions: PublicSubmission[]
+  voteCounts: VoteCount[]
+  roundNumber: number
+  puzzle: PuzzleForPlayers | null
+}
+
+export type ServerMessage =
+  | { type: 'FULL_STATE';       state: RoomState }
+  | { type: 'PLAYER_JOINED';    player: PlayerInfo }
+  | { type: 'PLAYER_LEFT';      playerId: string }
+  | { type: 'PHASE_CHANGED';    phase: Phase; endsAt: number | null; puzzle?: PuzzleForPlayers }
+  | { type: 'SUBMISSION_MADE';  submission: PublicSubmission }
+  | { type: 'VOTE_UPDATE';      submissionId: string; ups: number; downs: number }
+  | { type: 'ROUND_RESULTS';    results: RoundResult[]; deltas: WalletDelta[]; players: PlayerInfo[] }
+  | { type: 'GAME_ENDED';       leaderboard: LeaderboardEntry[] }
+  | { type: 'ERROR';            message: string }
+  | { type: 'PONG' }
+
 export interface PuzzleForPlayers {
   id: string
   title: string
@@ -103,63 +119,30 @@ export interface PuzzleForPlayers {
   y: number[]
 }
 
-export interface RoomState {
-  room: Room
-  players: PlayerInfo[]
-  currentRound: Round | null
-  submissions: PublicSubmission[]
-  voteCounts: VoteCount[]
-  roundNumber: number
-  /** Puzzle data for the active round — null when in lobby or finished. */
-  puzzle: PuzzleForPlayers | null
-}
+// Unary transform options shown in the submission form
+export const UNARY_TRANSFORM_OPTIONS = [
+  { key: 'identity',    label: 'identity:col',    desc: 'x (no change)' },
+  { key: 'square',      label: 'square:col',      desc: 'x²' },
+  { key: 'cube',        label: 'cube:col',         desc: 'x³' },
+  { key: 'sqrt',        label: 'sqrt:col',         desc: '√x' },
+  { key: 'abs',         label: 'abs:col',          desc: '|x|' },
+  { key: 'log',         label: 'log:col',          desc: 'ln(x)' },
+  { key: 'log2',        label: 'log2:col',         desc: 'log₂(x)' },
+  { key: 'reciprocal',  label: 'reciprocal:col',   desc: '1/x' },
+  { key: 'sin',         label: 'sin:col',          desc: 'sin(x)' },
+  { key: 'cos',         label: 'cos:col',          desc: 'cos(x)' },
+  { key: 'sin_2pi',     label: 'sin_2pi:col',      desc: 'sin(2πx)' },
+  { key: 'cos_2pi',     label: 'cos_2pi:col',      desc: 'cos(2πx)' },
+  { key: 'sin_period7', label: 'sin_period7:col',  desc: 'sin(2πx/7)' },
+  { key: 'cos_period7', label: 'cos_period7:col',  desc: 'cos(2πx/7)' },
+  { key: 'exp',         label: 'exp:col',          desc: 'eˣ' },
+  { key: 'floor10',     label: 'floor10:col',      desc: 'floor(x/10)·10' },
+  { key: 'step',        label: 'step:col',         desc: '1 if x≥0 else 0' },
+] as const
 
-// ─── WebSocket protocol ──────────────────────────────────────────────────────
-
-export type ServerMessage =
-  | { type: 'FULL_STATE';       state: RoomState }
-  | { type: 'PLAYER_JOINED';    player: PlayerInfo }
-  | { type: 'PLAYER_LEFT';      playerId: string }
-  /**
-   * Sent on every phase transition. Carries puzzle data when entering
-   * submission or voting so clients don't need a separate HTTP fetch.
-   */
-  | { type: 'PHASE_CHANGED';    phase: Phase; endsAt: number | null; puzzle?: PuzzleForPlayers }
-  | { type: 'SUBMISSION_MADE';  submission: PublicSubmission }
-  | { type: 'VOTE_UPDATE';      submissionId: string; ups: number; downs: number }
-  | { type: 'ROUND_RESULTS';    results: RoundResult[]; deltas: WalletDelta[]; players: PlayerInfo[] }
-  | { type: 'GAME_ENDED';       leaderboard: LeaderboardEntry[] }
-  | { type: 'ERROR';            message: string }
-  | { type: 'PONG' }
-
-// ─── Puzzle types ────────────────────────────────────────────────────────────
-
-export interface PuzzleInfo {
-  id: string
-  title: string
-  description: string
-  difficulty: 1 | 2 | 3
-  /** input column names shown to players */
-  columns: string[]
-}
-
-export interface PuzzleData extends PuzzleInfo {
-  /** Column arrays shown to players (the x-values) */
-  X: Record<string, number[]>
-  /** Output values shown to players */
-  y: number[]
-  /** Server-only — never sent to clients */
-  solutionFeatures: Feature[]
-  /** Power exponent per column, for fuzzy partial-credit scoring */
-  correctPowerMap: Record<string, number>
-}
-
-// ─── Cloudflare env ──────────────────────────────────────────────────────────
-
-export interface Env {
-  DB: D1Database
-  GAME_ROOM: DurableObjectNamespace
-  ENVIRONMENT: string
-  /** Master admin password — set via `wrangler secret put ADMIN_PASSWORD` in production */
-  ADMIN_PASSWORD: string
-}
+export const BINARY_TRANSFORM_OPTIONS = [
+  { key: 'multiply', label: 'multiply',  desc: 'a × b' },
+  { key: 'divide',   label: 'divide',    desc: 'a ÷ b' },
+  { key: 'add',      label: 'add',       desc: 'a + b' },
+  { key: 'distance', label: 'distance',  desc: '√(a²+b²)' },
+] as const

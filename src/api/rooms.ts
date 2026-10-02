@@ -15,9 +15,11 @@ rooms.post('/', async (c) => {
     name: string
     startingWallet?: number
     phase1Secs?: number
-    phase2Secs?: number
-    posterReward?: number
-    voterReward?: number
+    postStake?: number
+    postPayout?: number
+    voteStake?: number
+    backPayout?: number
+    hintCost?: number
     votesPerRound?: number
     anonymousVoting?: boolean
     maxRounds?: number | null
@@ -33,19 +35,21 @@ rooms.post('/', async (c) => {
   await c.env.DB.prepare(`
     INSERT INTO rooms (
       id, name, admin_token, status,
-      starting_wallet, phase1_secs, phase2_secs,
-      poster_reward, voter_reward, votes_per_round,
-      anonymous_voting, max_rounds, created_at
-    ) VALUES (?, ?, ?, 'lobby', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      starting_wallet, phase1_secs,
+      poster_reward, post_payout, voter_reward, back_payout, hint_cost,
+      votes_per_round, anonymous_voting, max_rounds, created_at
+    ) VALUES (?, ?, ?, 'lobby', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     id,
     body.name.trim(),
     adminToken,
     body.startingWallet ?? 1000,
     body.phase1Secs    ?? 300,
-    body.phase2Secs    ?? 180,
-    body.posterReward  ?? 200,
-    body.voterReward   ?? 50,
+    body.postStake     ?? 100,
+    body.postPayout    ?? 100,
+    body.voteStake     ?? 50,
+    body.backPayout    ?? 120,
+    body.hintCost      ?? 40,
     body.votesPerRound ?? 3,
     body.anonymousVoting ? 1 : 0,
     body.maxRounds     ?? null,

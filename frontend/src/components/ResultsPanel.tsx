@@ -1,127 +1,103 @@
-import type { RoundResult, WalletDelta, Feature } from '../types'
+import type { RoundSummary } from '../types'
+import { Formula } from '../lib/formula'
+
+const VERDICT = {
+  right: { label: '✓ Right', className: 'chip-up' },
+  close: { label: '≈ Close', className: 'chip-accent' },
+  wrong: { label: '✗ Wrong', className: 'chip-down' },
+} as const
 
 interface ResultsPanelProps {
-  results: RoundResult[]
-  deltas: WalletDelta[]
+  summary: RoundSummary
   myPlayerId: string
 }
 
-function featureToString(f: Feature): string {
-  if (typeof f === 'string') return f
-  return `${f.binary}(${f.a}, ${f.b})`
-}
-
-function r2Bar(r2: number) {
-  const pct = Math.round(r2 * 100)
-  return (
-    <div className="flex items-center gap-2">
-      <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all ${r2 >= 0.92 ? 'bg-brand-500' : r2 >= 0.5 ? 'bg-yellow-500' : 'bg-red-500'}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <span className="text-xs tabular-nums text-zinc-400 w-10 text-right">{r2.toFixed(3)}</span>
-    </div>
-  )
-}
-
-export default function ResultsPanel({ results, deltas, myPlayerId }: ResultsPanelProps) {
+export default function ResultsPanel({ summary, myPlayerId }: ResultsPanelProps) {
+  const { results, deltas, solution } = summary
   const myDelta = deltas.find((d) => d.playerId === myPlayerId)
+  const winners = results.filter((r) => r.verdict === 'right')
 
   return (
     <div className="flex flex-col gap-6">
-      {/* My wallet change summary */}
-      {myDelta && (
-        <div className={`
-          rounded-xl border p-4 text-center
-          ${myDelta.delta >= 0
-            ? 'bg-brand-500/10 border-brand-500/30'
-            : 'bg-red-500/10 border-red-500/30'}
-        `}>
-          <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Your round result</div>
-          <div className={`text-3xl font-bold ${myDelta.delta >= 0 ? 'text-brand-400' : 'text-red-400'}`}>
-            {myDelta.delta >= 0 ? '+' : ''}{myDelta.delta} coins
-          </div>
-          <div className="text-zinc-500 text-sm mt-1">
-            Balance: {myDelta.newBalance.toLocaleString()} coins
-          </div>
+      {/* Reveal */}
+      <section className="card-pop text-center animate-pop-in">
+        <div className="eyebrow mb-3">The black box was</div>
+        <div className="font-display text-3xl font-semibold leading-snug sm:text-4xl">
+          <Formula expr={solution} />
         </div>
+        <p className="mt-3 text-ink-3">
+          {winners.length === 0
+            ? 'Nobody cracked it this round.'
+            : `Cracked by ${winners.map((w) => (w.playerId === myPlayerId ? 'you' : w.label)).join(', ')}.`}
+        </p>
+      </section>
+
+      {/* My result */}
+      {myDelta && (
+        <section className={`rounded-2xl border-2 p-6 text-center ${
+          myDelta.delta >= 0 ? 'border-up bg-up-soft' : 'border-down bg-down-soft'
+        }`}>
+          <div className="eyebrow mb-1">Your round</div>
+          <div className={`tabular font-display text-5xl font-bold ${myDelta.delta >= 0 ? 'text-up' : 'text-down'}`}>
+            {myDelta.delta >= 0 ? '+' : '−'}{Math.abs(myDelta.delta).toLocaleString()}
+          </div>
+          <div className="mt-1 text-ink-2">
+            Wallet now <span className="tabular font-semibold">{myDelta.newBalance.toLocaleString()}</span> coins
+          </div>
+        </section>
       )}
 
-      {/* Submission results */}
-      <div className="flex flex-col gap-3">
-        <div className="text-xs text-zinc-500 uppercase tracking-wider">Submission Scores</div>
-        {results.map((r) => {
-          const isOwn = r.playerId === myPlayerId
-          return (
-            <div
-              key={r.submissionId}
-              className={`card ${isOwn ? 'border-brand-500/30 bg-brand-500/5' : ''}`}
-            >
-              <div className="flex items-start justify-between gap-3 mb-3">
-                <div>
-                  <span className={`font-medium ${isOwn ? 'text-brand-400' : 'text-zinc-300'}`}>
-                    {r.label}
-                    {isOwn && <span className="text-zinc-500 text-xs ml-1.5">(you)</span>}
-                  </span>
-                  <div className="flex flex-wrap gap-1 mt-1.5">
-                    {r.features.map((f, i) => (
-                      <code key={i} className="text-xs bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-zinc-300">
-                        {featureToString(f)}
-                      </code>
-                    ))}
+      {/* Every claim */}
+      {results.length > 0 && (
+        <section className="flex flex-col gap-3">
+          <div className="eyebrow">Every claim</div>
+          {results.map((r) => {
+            const isOwn = r.playerId === myPlayerId
+            return (
+              <div
+                key={r.submissionId}
+                className={`flex flex-wrap items-center gap-4 rounded-2xl border bg-white p-5 shadow-soft ${
+                  isOwn ? 'border-2 border-ink' : 'border-line'
+                }`}
+              >
+                <span className={VERDICT[r.verdict].className}>{VERDICT[r.verdict].label}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="font-display text-lg font-medium break-words">
+                    <Formula expr={r.expr} />
+                  </div>
+                  <div className="mt-0.5 text-sm text-ink-3">
+                    {isOwn ? 'You' : r.label} · {(r.accuracy * 100).toFixed(1)}% match · ▲{r.ups} ▼{r.downs}
                   </div>
                 </div>
-                <div className="flex flex-col items-end gap-1 shrink-0">
-                  <span className={`badge text-sm font-bold px-3 ${r.isCorrect ? 'badge-green' : 'badge-red'}`}>
-                    {r.isCorrect ? 'CORRECT' : 'WRONG'}
-                  </span>
-                  <span className="text-zinc-400 text-xs">+{r.baseScore} score pts</span>
-                </div>
               </div>
-              {r2Bar(r.r2Score)}
-            </div>
-          )
-        })}
-      </div>
+            )
+          })}
+        </section>
+      )}
 
-      {/* Wallet deltas table */}
+      {/* Wallet changes */}
       {deltas.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <div className="text-xs text-zinc-500 uppercase tracking-wider">Wallet Changes</div>
+        <section className="flex flex-col gap-3">
+          <div className="eyebrow">Money moved</div>
           <div className="card overflow-hidden p-0">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-zinc-800/80">
-                  <th className="px-4 py-2 text-left text-zinc-400 font-medium">Player</th>
-                  <th className="px-4 py-2 text-right text-zinc-400 font-medium">Change</th>
-                  <th className="px-4 py-2 text-right text-zinc-400 font-medium">Balance</th>
-                </tr>
-              </thead>
+            <table className="tabular w-full text-sm">
               <tbody>
-                {deltas
-                  .sort((a, b) => b.delta - a.delta)
-                  .map((d) => (
-                    <tr
-                      key={d.playerId}
-                      className={`border-t border-zinc-800/50 ${d.playerId === myPlayerId ? 'bg-brand-500/5' : ''}`}
-                    >
-                      <td className={`px-4 py-2 ${d.playerId === myPlayerId ? 'text-brand-400 font-medium' : 'text-zinc-300'}`}>
-                        {d.username}
+                {[...deltas].sort((a, b) => b.delta - a.delta).map((d) => {
+                  const isMe = d.playerId === myPlayerId
+                  return (
+                    <tr key={d.playerId} className={`border-t border-line first:border-t-0 ${isMe ? 'bg-accent-soft/50' : ''}`}>
+                      <td className="px-5 py-3 font-semibold">{isMe ? `${d.username} (you)` : d.username}</td>
+                      <td className={`px-5 py-3 text-right font-semibold ${d.delta >= 0 ? 'text-up' : 'text-down'}`}>
+                        {d.delta >= 0 ? '+' : '−'}{Math.abs(d.delta)}
                       </td>
-                      <td className={`px-4 py-2 text-right font-bold tabular-nums ${d.delta >= 0 ? 'text-brand-400' : 'text-red-400'}`}>
-                        {d.delta >= 0 ? '+' : ''}{d.delta}
-                      </td>
-                      <td className="px-4 py-2 text-right text-zinc-400 tabular-nums">
-                        {d.newBalance.toLocaleString()}
-                      </td>
+                      <td className="px-5 py-3 text-right text-ink-3">{d.newBalance.toLocaleString()}</td>
                     </tr>
-                  ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
-        </div>
+        </section>
       )}
     </div>
   )

@@ -93,10 +93,7 @@ admin.get('/rooms/:id/admin/state', async (c) => {
   if (round?.puzzleId) {
     const puzzle = PUZZLE_MAP.get(round.puzzleId)
     if (puzzle) {
-      correctAnswer = {
-        solutionFeatures: puzzle.solutionFeatures,
-        correctPowerMap:  puzzle.correctPowerMap,
-      }
+      correctAnswer = { solution: puzzle.solution, hints: puzzle.hints }
     }
   }
 

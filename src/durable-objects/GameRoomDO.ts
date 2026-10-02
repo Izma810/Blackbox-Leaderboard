@@ -1,15 +1,13 @@
 import type {
-  Env, ServerMessage, PlayerInfo, RoomState, Phase,
-  PublicSubmission, Feature, RoundResult, WalletDelta, LeaderboardEntry,
-  PuzzleForPlayers,
+  Env, ServerMessage, RoomState, PublicSubmission, RoundResult, RoundSummary,
+  WalletDelta, LeaderboardEntry, PuzzleForPlayers, Round, Room, VoteType,
 } from '../types'
 import { PUZZLE_MAP, getPuzzleForPlayers } from '../game/puzzles'
-import { buildFeatureMatrix, evaluateSubmission, fuzzyPowerScore } from '../game/scoring'
-import { isTooSimilar } from '../game/similarity'
+import { compileFormula, judge, normalisedDistance, DUPLICATE_TOLERANCE } from '../game/formula'
 import {
-  getRoomById, getPlayersByRoom, getCurrentRound, getRoundById,
+  getRoomById, getPlayersByRoom, getPlayerById, getCurrentRound,
   getSubmissionsForRound, buildPublicSubmissions, getVoteCountsForRound,
-  getVoteCountForSubmission, getPlayerVoteCount, rowToRoom,
+  getVoteCountForSubmission, getPlayerVoteCount, getPlayerVotes,
 } from '../db/d1'
 
 function jsonRes(data: unknown, status = 200): Response {
@@ -19,14 +17,41 @@ function jsonRes(data: unknown, status = 200): Response {
   })
 }
 
+/**
+ * Money rules. From room config: Ps = post stake, Pp = post payout,
+ * Vs = vote stake, Bp = back payout (always > Pp, so backing a right answer
+ * pays more than posting it).
+ *
+ *   Posting, voting and hints are paid for up front — the coins leave your
+ *   wallet immediately. When the round ends each formula is judged and settled:
+ *
+ *              RIGHT                        CLOSE (right shape,         WRONG
+ *                                           wrong numbers)
+ *   poster     stake back + Pp              stake back + Pp/2           stake lost to bank
+ *              + every doubter's stake                                  − Vs paid to each doubter
+ *   backer     stake back + Bp              stake back + Bp/2           stake lost to bank
+ *   doubter    stake goes to the poster     stake back                  stake back + Vs from poster
+ */
 export class GameRoomDO implements DurableObject {
   private connections = new Map<string, WebSocket>()  // playerId → WebSocket
   private ctx: DurableObjectState
   private env: Env
+  /**
+   * D1 calls are not covered by Durable Object input gates, so concurrent
+   * requests can interleave across awaits. Every state-changing operation runs
+   * through this queue to keep budget, wallet and duplicate checks race-free.
+   */
+  private queue: Promise<unknown> = Promise.resolve()
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx
     this.env = env
+  }
+
+  private serialized<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn, fn)
+    this.queue = run.catch(() => {})
+    return run
   }
 
   // ─── Main fetch dispatcher ────────────────────────────────────────────────
@@ -43,7 +68,7 @@ export class GameRoomDO implements DurableObject {
 
     // WebSocket upgrade
     if (request.headers.get('Upgrade') === 'websocket') {
-      return this.handleWebSocket(request, url, roomId)
+      return this.handleWebSocket(url, roomId)
     }
 
     // Internal HTTP actions
@@ -54,32 +79,33 @@ export class GameRoomDO implements DurableObject {
     }
 
     switch (action) {
-      case 'submit':               return this.handleSubmit(roomId, body)
-      case 'vote':                 return this.handleVote(roomId, body)
-      case 'admin/start-round':    return this.handleStartRound(roomId, body)
-      case 'admin/advance-phase':  return this.handleAdvancePhase(roomId)
-      case 'admin/end-game':       return this.handleEndGame(roomId)
-      case 'admin/config':         return this.handleUpdateConfig(roomId, body)
+      case 'submit':               return this.serialized(() => this.handleSubmit(roomId, body))
+      case 'vote':                 return this.serialized(() => this.handleVote(roomId, body))
+      case 'hint':                 return this.serialized(() => this.handleHint(roomId, body))
+      case 'admin/start-round':    return this.serialized(() => this.handleStartRound(roomId, body))
+      case 'admin/advance-phase':  return this.serialized(() => this.handleAdvancePhase(roomId))
+      case 'admin/end-game':       return this.serialized(() => this.handleEndGame(roomId))
+      case 'admin/config':         return this.serialized(() => this.handleUpdateConfig(roomId, body))
       case 'state':                return this.handleGetState(roomId)
       default:                     return new Response('Not found', { status: 404 })
     }
   }
 
-  // ─── Alarm (phase timer) ──────────────────────────────────────────────────
+  // ─── Alarm (round timer) ──────────────────────────────────────────────────
 
   async alarm(): Promise<void> {
     const roomId = await this.ctx.storage.get<string>('roomId')
     if (!roomId) return
-    await this.advancePhase(roomId)
+    await this.serialized(async () => {
+      const round = await getCurrentRound(this.env.DB, roomId)
+      // Only the live phase is timed; ignore stale alarms
+      if (round?.phase === 'submission') await this.transitionToResults(roomId, round)
+    })
   }
 
   // ─── WebSocket handling ───────────────────────────────────────────────────
 
-  private handleWebSocket(request: Request, url: URL, roomId: string): Response {
-    if (request.headers.get('Upgrade') !== 'websocket') {
-      return new Response('Expected WebSocket', { status: 426 })
-    }
-
+  private handleWebSocket(url: URL, roomId: string): Response {
     const playerId = url.searchParams.get('playerId') ?? ''
 
     const pair = new WebSocketPair()
@@ -96,12 +122,12 @@ export class GameRoomDO implements DurableObject {
     })
 
     server.addEventListener('close', () => {
-      this.connections.delete(playerId)
+      if (this.connections.get(playerId) === server) this.connections.delete(playerId)
       this.ctx.waitUntil(this.onPlayerDisconnect(playerId))
     })
 
     server.addEventListener('error', () => {
-      this.connections.delete(playerId)
+      if (this.connections.get(playerId) === server) this.connections.delete(playerId)
     })
 
     // Send initial state and notify others asynchronously
@@ -116,7 +142,7 @@ export class GameRoomDO implements DurableObject {
         .prepare('UPDATE players SET is_connected = 1 WHERE id = ?')
         .bind(playerId).run()
 
-      const state = await this.buildRoomState(roomId)
+      const state = await this.buildRoomState(roomId, playerId)
       server.send(JSON.stringify({ type: 'FULL_STATE', state } satisfies ServerMessage))
 
       const player = state.players.find((p) => p.id === playerId)
@@ -139,7 +165,7 @@ export class GameRoomDO implements DurableObject {
 
   // ─── State builder ────────────────────────────────────────────────────────
 
-  private async buildRoomState(roomId: string): Promise<RoomState> {
+  private async buildRoomState(roomId: string, playerId?: string): Promise<RoomState> {
     const [room, players, round] = await Promise.all([
       getRoomById(this.env.DB, roomId),
       getPlayersByRoom(this.env.DB, roomId),
@@ -149,14 +175,22 @@ export class GameRoomDO implements DurableObject {
     if (!room) throw new Error('Room not found')
 
     let submissions: PublicSubmission[] = []
-    let voteCounts: import('../types').VoteCount[] = []
+    let voteCounts: RoomState['voteCounts'] = []
+    let myVotes: RoomState['myVotes'] = {}
+    let myHints: string[] = []
+    let summary: RoundSummary | null = null
+    const puzzleData = round ? PUZZLE_MAP.get(round.puzzleId) : undefined
 
     if (round) {
       const rows = await getSubmissionsForRound(this.env.DB, round.id)
       submissions = buildPublicSubmissions(rows, room.config.anonymousVoting)
-      if (round.phase === 'voting' || round.phase === 'results') {
-        voteCounts = await getVoteCountsForRound(this.env.DB, round.id)
+      voteCounts = await getVoteCountsForRound(this.env.DB, round.id)
+      if (playerId) {
+        myVotes = await getPlayerVotes(this.env.DB, round.id, playerId)
+        const bought = await this.hintsBought(round.id, playerId)
+        myHints = puzzleData?.hints.slice(0, bought) ?? []
       }
+      if (round.phase === 'results') summary = await this.buildSummary(room, round)
     }
 
     const completedRounds = await this.env.DB
@@ -165,7 +199,7 @@ export class GameRoomDO implements DurableObject {
 
     // Include puzzle data for active rounds (never includes solution)
     let puzzle: PuzzleForPlayers | null = null
-    if (round && round.phase !== 'finished') {
+    if (round) {
       const p = PUZZLE_MAP.get(round.puzzleId)
       if (p) puzzle = getPuzzleForPlayers(p)
     }
@@ -176,79 +210,86 @@ export class GameRoomDO implements DurableObject {
       currentRound: round,
       submissions,
       voteCounts,
+      myVotes,
+      myHints,
       roundNumber: (completedRounds?.cnt ?? 0) + (round ? 1 : 0),
       puzzle,
+      summary,
     }
   }
 
   // ─── Submit handler ───────────────────────────────────────────────────────
 
   private async handleSubmit(roomId: string, body: Record<string, unknown>): Promise<Response> {
-    const { playerId, features } = body as { playerId: string; features: Feature[] }
-
-    if (!playerId || !features?.length) {
-      return jsonRes({ error: 'Missing playerId or features' }, 400)
-    }
+    const playerId = body.playerId as string
+    if (!playerId) return jsonRes({ error: 'Missing playerId' }, 400)
 
     const round = await getCurrentRound(this.env.DB, roomId)
     if (!round || round.phase !== 'submission') {
-      return jsonRes({ error: 'Not in submission phase' }, 400)
+      return jsonRes({ error: 'The round is not live' }, 400)
     }
 
-    // Idempotency: already submitted?
     const already = await this.env.DB
       .prepare('SELECT id FROM submissions WHERE round_id = ? AND player_id = ?')
       .bind(round.id, playerId).first()
-    if (already) return jsonRes({ error: 'Already submitted for this round' }, 409)
+    if (already) return jsonRes({ error: 'You already posted a formula this round' }, 409)
 
-    // Puzzle data
     const puzzle = PUZZLE_MAP.get(round.puzzleId)
     if (!puzzle) return jsonRes({ error: 'Puzzle not found' }, 500)
 
-    // Validate features can be applied to puzzle columns
-    let newMatrix: number[][]
+    const expr = typeof body.expr === 'string' ? body.expr.trim() : ''
+    let prediction: number[]
     try {
-      newMatrix = buildFeatureMatrix(features, puzzle.X)
+      ({ prediction } = compileFormula(expr, puzzle.X))
     } catch (e) {
       return jsonRes({ error: (e as Error).message }, 400)
     }
 
-    // Similarity check against existing submissions
-    const existingRows = await getSubmissionsForRound(this.env.DB, round.id)
-    const existingMatrices = existingRows.map((r) =>
-      buildFeatureMatrix(JSON.parse(r.features_json) as Feature[], puzzle.X),
-    )
-    if (isTooSimilar(newMatrix, existingMatrices)) {
-      return jsonRes({ error: 'Too similar to an existing submission — pick a different approach' }, 409)
+    const [room, player] = await Promise.all([
+      getRoomById(this.env.DB, roomId),
+      getPlayerById(this.env.DB, playerId),
+    ])
+    if (!room || !player) return jsonRes({ error: 'Room or player not found' }, 404)
+
+    const stake = room.config.postStake
+    if (player.wallet < stake) {
+      return jsonRes({ error: `Posting costs ${stake} coins — you have ${player.wallet}` }, 403)
     }
 
-    // Insert submission
-    const submissionId = crypto.randomUUID()
-    await this.env.DB
-      .prepare(`
-        INSERT INTO submissions (id, round_id, player_id, features_json, submitted_at)
-        VALUES (?, ?, ?, ?, ?)
-      `)
-      .bind(submissionId, round.id, playerId, JSON.stringify(features), Date.now())
-      .run()
+    // Duplicate check: same predictions as an existing formula ⇒ same answer
+    const existingRows = await getSubmissionsForRound(this.env.DB, round.id)
+    const existing = buildPublicSubmissions(existingRows, room.config.anonymousVoting)
+    for (const sub of existing) {
+      let other: number[]
+      try { ({ prediction: other } = compileFormula(sub.expr, puzzle.X)) } catch { continue }
+      if (normalisedDistance(prediction, other, puzzle.y) < DUPLICATE_TOLERANCE) {
+        return jsonRes({
+          error: `${sub.label} already claimed this formula. Back it with an upvote, or try something different.`,
+          duplicateOf: sub.id,
+        }, 409)
+      }
+    }
 
-    // Build label for broadcast
-    const room = await getRoomById(this.env.DB, roomId)
-    const label = room?.config.anonymousVoting
-      ? String.fromCharCode(65 + existingRows.length)  // A, B, C, …
-      : ((await this.env.DB
-            .prepare('SELECT username FROM players WHERE id = ?')
-            .bind(playerId).first<{ username: string }>())?.username ?? playerId)
+    const submissionId = crypto.randomUUID()
+    const now = Date.now()
+    await this.env.DB.batch([
+      this.env.DB
+        .prepare(`INSERT INTO submissions (id, round_id, player_id, features_json, submitted_at)
+                  VALUES (?, ?, ?, ?, ?)`)
+        .bind(submissionId, round.id, playerId, expr, now),
+      ...this.walletStmts(playerId, round.id, -stake, 'post_stake', 'Posted a formula', now),
+    ])
 
     const publicSub: PublicSubmission = {
       id: submissionId,
       playerId,
-      label,
-      features,
-      submittedAt: Date.now(),
+      label: room.config.anonymousVoting ? String.fromCharCode(65 + existing.length) : player.username,
+      expr,
+      submittedAt: now,
     }
 
     this.broadcast({ type: 'SUBMISSION_MADE', submission: publicSub })
+    await this.broadcastPlayer(playerId)
 
     return jsonRes({ ok: true, submissionId })
   }
@@ -257,7 +298,7 @@ export class GameRoomDO implements DurableObject {
 
   private async handleVote(roomId: string, body: Record<string, unknown>): Promise<Response> {
     const { playerId, submissionId, voteType } = body as {
-      playerId: string; submissionId: string; voteType: 'up' | 'down'
+      playerId: string; submissionId: string; voteType: VoteType
     }
 
     if (!playerId || !submissionId || !voteType) {
@@ -268,45 +309,96 @@ export class GameRoomDO implements DurableObject {
     }
 
     const round = await getCurrentRound(this.env.DB, roomId)
-    if (!round || round.phase !== 'voting') {
-      return jsonRes({ error: 'Not in voting phase' }, 400)
+    if (!round || round.phase !== 'submission') {
+      return jsonRes({ error: 'The round is not live' }, 400)
     }
 
-    // Cannot vote on own submission
     const sub = await this.env.DB
       .prepare('SELECT player_id FROM submissions WHERE id = ? AND round_id = ?')
       .bind(submissionId, round.id).first<{ player_id: string }>()
     if (!sub) return jsonRes({ error: 'Submission not found' }, 404)
-    if (sub.player_id === playerId) return jsonRes({ error: 'Cannot vote on your own submission' }, 403)
+    if (sub.player_id === playerId) return jsonRes({ error: 'You cannot vote on your own formula' }, 403)
 
-    // Vote budget check
-    const room = await getRoomById(this.env.DB, roomId)
-    if (!room) return jsonRes({ error: 'Room not found' }, 404)
+    const [room, player] = await Promise.all([
+      getRoomById(this.env.DB, roomId),
+      getPlayerById(this.env.DB, playerId),
+    ])
+    if (!room || !player) return jsonRes({ error: 'Room or player not found' }, 404)
 
     const usedVotes = await getPlayerVoteCount(this.env.DB, round.id, playerId)
     if (usedVotes >= room.config.votesPerRound) {
-      return jsonRes({ error: 'Vote budget exhausted' }, 403)
+      return jsonRes({ error: 'You have used all your votes this round' }, 403)
     }
 
-    // Duplicate vote check (UNIQUE constraint handles this, but nice to give a clear error)
     const dupVote = await this.env.DB
       .prepare('SELECT 1 FROM votes WHERE round_id = ? AND voter_id = ? AND submission_id = ?')
       .bind(round.id, playerId, submissionId).first()
-    if (dupVote) return jsonRes({ error: 'Already voted on this submission' }, 409)
+    if (dupVote) return jsonRes({ error: 'You already voted on this formula' }, 409)
 
-    const voteId = crypto.randomUUID()
-    await this.env.DB
-      .prepare(`
-        INSERT INTO votes (id, round_id, submission_id, voter_id, vote_type, voted_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `)
-      .bind(voteId, round.id, submissionId, playerId, voteType, Date.now())
-      .run()
+    const stake = room.config.voteStake
+    if (player.wallet < stake) {
+      return jsonRes({ error: `A vote costs ${stake} coins — you have ${player.wallet}` }, 403)
+    }
+
+    const now = Date.now()
+    await this.env.DB.batch([
+      this.env.DB
+        .prepare(`INSERT INTO votes (id, round_id, submission_id, voter_id, vote_type, voted_at)
+                  VALUES (?, ?, ?, ?, ?, ?)`)
+        .bind(crypto.randomUUID(), round.id, submissionId, playerId, voteType, now),
+      ...this.walletStmts(
+        playerId, round.id, -stake, 'vote_stake',
+        voteType === 'up' ? 'Upvoted a formula' : 'Downvoted a formula', now,
+      ),
+    ])
 
     const counts = await getVoteCountForSubmission(this.env.DB, submissionId)
     this.broadcast({ type: 'VOTE_UPDATE', submissionId, ...counts })
+    await this.broadcastPlayer(playerId)
 
     return jsonRes({ ok: true, votesRemaining: room.config.votesPerRound - usedVotes - 1 })
+  }
+
+  // ─── Hint handler ─────────────────────────────────────────────────────────
+
+  private async handleHint(roomId: string, body: Record<string, unknown>): Promise<Response> {
+    const playerId = body.playerId as string
+    if (!playerId) return jsonRes({ error: 'Missing playerId' }, 400)
+
+    const round = await getCurrentRound(this.env.DB, roomId)
+    if (!round || round.phase !== 'submission') {
+      return jsonRes({ error: 'Hints are only available while a round is live' }, 400)
+    }
+    const puzzle = PUZZLE_MAP.get(round.puzzleId)
+    if (!puzzle) return jsonRes({ error: 'Puzzle not found' }, 500)
+
+    const [room, player, bought] = await Promise.all([
+      getRoomById(this.env.DB, roomId),
+      getPlayerById(this.env.DB, playerId),
+      this.hintsBought(round.id, playerId),
+    ])
+    if (!room || !player) return jsonRes({ error: 'Room or player not found' }, 404)
+    if (bought >= puzzle.hints.length) return jsonRes({ error: 'You already have every hint' }, 409)
+
+    const cost = room.config.hintCost
+    if (player.wallet < cost) {
+      return jsonRes({ error: `A hint costs ${cost} coins — you have ${player.wallet}` }, 403)
+    }
+
+    await this.env.DB.batch(
+      this.walletStmts(playerId, round.id, -cost, 'hint', `Bought hint ${bought + 1}`, Date.now()),
+    )
+    await this.broadcastPlayer(playerId)
+
+    return jsonRes({ ok: true, hints: puzzle.hints.slice(0, bought + 1) })
+  }
+
+  private async hintsBought(roundId: string, playerId: string): Promise<number> {
+    const r = await this.env.DB
+      .prepare(`SELECT COUNT(*) as cnt FROM wallet_transactions
+                WHERE round_id = ? AND player_id = ? AND type = 'hint'`)
+      .bind(roundId, playerId).first<{ cnt: number }>()
+    return r?.cnt ?? 0
   }
 
   // ─── Admin: start round ───────────────────────────────────────────────────
@@ -333,13 +425,11 @@ export class GameRoomDO implements DurableObject {
         .bind(Date.now(), active.id).run()
     }
 
-    // Get next round number
     const cnt = await this.env.DB
       .prepare('SELECT COUNT(*) as cnt FROM rounds WHERE room_id = ?')
       .bind(roomId).first<{ cnt: number }>()
     const roundNumber = (cnt?.cnt ?? 0) + 1
 
-    // Create round
     const roundId = crypto.randomUUID()
     const phaseEndsAt = Date.now() + room.config.phase1Secs * 1000
     await this.env.DB
@@ -350,26 +440,21 @@ export class GameRoomDO implements DurableObject {
       .bind(roundId, roomId, roundNumber, puzzleId, phaseEndsAt, Date.now())
       .run()
 
-    // Snapshot eligible players
     const players = await getPlayersByRoom(this.env.DB, roomId)
     if (players.length > 0) {
-      const insertStmts = players.map((p) =>
+      await this.env.DB.batch(players.map((p) =>
         this.env.DB
           .prepare('INSERT OR IGNORE INTO round_players (round_id, player_id) VALUES (?, ?)')
           .bind(roundId, p.id),
-      )
-      await this.env.DB.batch(insertStmts)
+      ))
     }
 
-    // Update room status
     await this.env.DB
       .prepare('UPDATE rooms SET status = ? WHERE id = ?')
       .bind('active', roomId).run()
 
-    // Schedule alarm for phase end
     await this.ctx.storage.setAlarm(phaseEndsAt)
 
-    // Broadcast puzzle data with phase change so clients render immediately
     const puzzleForBroadcast = getPuzzleForPlayers(PUZZLE_MAP.get(puzzleId)!)
     this.broadcast({ type: 'PHASE_CHANGED', phase: 'submission', endsAt: phaseEndsAt, puzzle: puzzleForBroadcast })
 
@@ -379,18 +464,23 @@ export class GameRoomDO implements DurableObject {
   // ─── Admin: force-advance phase ───────────────────────────────────────────
 
   private async handleAdvancePhase(roomId: string): Promise<Response> {
-    await this.advancePhase(roomId)
+    const round = await getCurrentRound(this.env.DB, roomId)
+    if (round?.phase === 'submission') await this.transitionToResults(roomId, round)
+    else if (round?.phase === 'results') await this.closeRound(round)
     return jsonRes({ ok: true })
   }
 
   // ─── Admin: end game ──────────────────────────────────────────────────────
 
   private async handleEndGame(roomId: string): Promise<Response> {
-    // Close any active round first
+    await this.endGame(roomId)
+    return jsonRes({ ok: true })
+  }
+
+  private async endGame(roomId: string) {
     const round = await getCurrentRound(this.env.DB, roomId)
-    if (round && round.phase !== 'results') {
-      await this.advancePhase(roomId)   // force through to results
-    }
+    // Settle a live round before closing so no stakes are left hanging
+    if (round?.phase === 'submission') await this.transitionToResults(roomId, round, false)
     if (round) {
       await this.env.DB
         .prepare('UPDATE rounds SET ended_at = ? WHERE id = ?')
@@ -403,8 +493,6 @@ export class GameRoomDO implements DurableObject {
 
     const leaderboard = await this.buildLeaderboard(roomId)
     this.broadcast({ type: 'GAME_ENDED', leaderboard })
-
-    return jsonRes({ ok: true })
   }
 
   // ─── Admin: update config ─────────────────────────────────────────────────
@@ -412,13 +500,22 @@ export class GameRoomDO implements DurableObject {
   private async handleUpdateConfig(roomId: string, body: Record<string, unknown>): Promise<Response> {
     const round = await getCurrentRound(this.env.DB, roomId)
     if (round && round.phase === 'submission') {
-      return jsonRes({ error: 'Cannot change config during submission phase' }, 409)
+      return jsonRes({ error: 'Cannot change settings while a round is live' }, 409)
     }
 
     const allowed = [
-      'phase1_secs', 'phase2_secs', 'poster_reward', 'voter_reward',
+      'phase1_secs', 'poster_reward', 'post_payout', 'voter_reward', 'back_payout', 'hint_cost',
       'votes_per_round', 'anonymous_voting', 'max_rounds', 'starting_wallet',
     ]
+
+    // Backing a right answer must always pay more than posting it
+    const room = await getRoomById(this.env.DB, roomId)
+    if (!room) return jsonRes({ error: 'Room not found' }, 404)
+    const postPayout = Number(body.post_payout ?? room.config.postPayout)
+    const backPayout = Number(body.back_payout ?? room.config.backPayout)
+    if (!(backPayout > postPayout)) {
+      return jsonRes({ error: 'The back payout must be bigger than the post payout' }, 400)
+    }
     const sets: string[] = []
     const vals: unknown[] = []
 
@@ -446,231 +543,157 @@ export class GameRoomDO implements DurableObject {
     return jsonRes(state)
   }
 
-  // ─── Phase transition engine ──────────────────────────────────────────────
+  // ─── Round settlement ─────────────────────────────────────────────────────
 
-  private async advancePhase(roomId: string): Promise<void> {
-    const round = await getCurrentRound(this.env.DB, roomId)
-    if (!round) return
-
-    if (round.phase === 'submission') {
-      await this.transitionToVoting(roomId, round)
-    } else if (round.phase === 'voting') {
-      await this.transitionToResults(roomId, round)
-    } else if (round.phase === 'results') {
-      await this.closeRound(roomId, round)
-    }
-  }
-
-  private async transitionToVoting(roomId: string, round: { id: string; puzzleId: string }) {
-    const room = await getRoomById(this.env.DB, roomId)
-    if (!room) return
-
-    const phaseEndsAt = Date.now() + room.config.phase2Secs * 1000
-    await this.env.DB
-      .prepare('UPDATE rounds SET phase = ?, phase_ends_at = ? WHERE id = ?')
-      .bind('voting', phaseEndsAt, round.id).run()
-
-    await this.ctx.storage.setAlarm(phaseEndsAt)
-
-    // Keep puzzle in broadcast so reconnecting clients stay in sync
-    const puzzleForBroadcast = getPuzzleForPlayers(PUZZLE_MAP.get(round.puzzleId)!)
-    this.broadcast({ type: 'PHASE_CHANGED', phase: 'voting', endsAt: phaseEndsAt, puzzle: puzzleForBroadcast })
-  }
-
-  private async transitionToResults(roomId: string, round: { id: string; puzzleId: string }) {
+  private async transitionToResults(roomId: string, round: Round, allowAutoEnd = true) {
     await this.ctx.storage.deleteAlarm()
 
-    // Evaluate all submissions
     const puzzle = PUZZLE_MAP.get(round.puzzleId)
-    if (!puzzle) return
-
-    const submissionRows = await getSubmissionsForRound(this.env.DB, round.id)
     const room = await getRoomById(this.env.DB, roomId)
-    if (!room) return
+    if (!puzzle || !room) return
 
-    type SubInfo = {
-      id: string; playerId: string; features: Feature[]
-      r2: number; baseScore: number; isCorrect: boolean
+    const { postStake: Ps, postPayout: Pp, voteStake: Vs, backPayout: Bp } = room.config
+    const now = Date.now()
+
+    const [submissionRows, voteRows] = await Promise.all([
+      getSubmissionsForRound(this.env.DB, round.id),
+      this.env.DB
+        .prepare('SELECT submission_id, voter_id, vote_type FROM votes WHERE round_id = ?')
+        .bind(round.id)
+        .all<{ submission_id: string; voter_id: string; vote_type: VoteType }>(),
+    ])
+
+    const stmts: D1PreparedStatement[] = []
+    const pay = (playerId: string, delta: number, type: string, note: string) => {
+      if (delta !== 0) stmts.push(...this.walletStmts(playerId, round.id, delta, type, note, now))
     }
-    const evaluated: SubInfo[] = []
 
     for (const row of submissionRows) {
-      const features = JSON.parse(row.features_json) as Feature[]
-      let r2 = 0, baseScore = 0, isCorrect = false
-      try {
-        const result = evaluateSubmission(features, puzzle.X, puzzle.y)
-        r2 = result.r2
-        isCorrect = result.isCorrect
-        baseScore = isCorrect
-          ? result.baseScore
-          : fuzzyPowerScore(features, puzzle.correctPowerMap)
-      } catch { /* malformed features — score = 0 */ }
+      const { verdict, r2 } = judge(row.features_json, puzzle.X, puzzle.y, puzzle.solution)
+      const votes = voteRows.results.filter((v) => v.submission_id === row.id)
+      const backers = votes.filter((v) => v.vote_type === 'up')
+      const doubters = votes.filter((v) => v.vote_type === 'down')
 
-      evaluated.push({ id: row.id, playerId: row.player_id, features, r2, baseScore, isCorrect })
-    }
-
-    // Settle wallets  ── all in one atomic batch
-    const now = Date.now()
-    const playerDeltas: Map<string, number> = new Map()
-
-    const txStmts = []
-
-    for (const sub of evaluated) {
-      // Update submission scores
-      txStmts.push(
+      stmts.push(
         this.env.DB
-          .prepare('UPDATE submissions SET r2_score = ?, base_score = ?, is_correct = ? WHERE id = ?')
-          .bind(sub.r2, sub.baseScore, sub.isCorrect ? 1 : 0, sub.id),
+          .prepare('UPDATE submissions SET r2_score = ?, is_correct = ? WHERE id = ?')
+          .bind(r2, verdict === 'right' ? 1 : 0, row.id),
       )
 
-      // Poster reward/penalty
-      const posterDelta = sub.isCorrect ? room.config.posterReward : -room.config.posterReward
-      playerDeltas.set(sub.playerId, (playerDeltas.get(sub.playerId) ?? 0) + posterDelta)
-
-      txStmts.push(
-        this.env.DB
-          .prepare(`INSERT INTO wallet_transactions (id, player_id, round_id, type, delta, note, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .bind(
-            crypto.randomUUID(), sub.playerId, round.id,
-            sub.isCorrect ? 'submission_reward' : 'submission_penalty',
-            posterDelta,
-            sub.isCorrect ? 'Correct submission' : 'Wrong submission',
-            now,
-          ),
-      )
-
-      // Voter rewards/penalties
-      const votes = await this.env.DB
-        .prepare('SELECT voter_id, vote_type FROM votes WHERE submission_id = ?')
-        .bind(sub.id).all<{ voter_id: string; vote_type: string }>()
-
-      for (const vote of votes.results) {
-        let voterDelta = 0
-        let txType = ''
-        let txNote = ''
-
-        if (sub.isCorrect) {
-          if (vote.vote_type === 'up') {
-            voterDelta = room.config.voterReward
-            txType = 'upvote_correct_reward'
-            txNote = 'Upvoted a correct submission'
-          } else {
-            voterDelta = -room.config.voterReward
-            txType = 'downvote_correct_penalty'
-            txNote = 'Downvoted a correct submission'
-            // Loser pays poster
-            playerDeltas.set(sub.playerId, (playerDeltas.get(sub.playerId) ?? 0) + room.config.voterReward)
-          }
-        } else {
-          if (vote.vote_type === 'down') {
-            voterDelta = room.config.voterReward
-            txType = 'downvote_wrong_reward'
-            txNote = 'Downvoted a wrong submission'
-          } else {
-            voterDelta = -room.config.voterReward
-            txType = 'upvote_wrong_penalty'
-            txNote = 'Upvoted a wrong submission'
-          }
-        }
-
-        playerDeltas.set(vote.voter_id, (playerDeltas.get(vote.voter_id) ?? 0) + voterDelta)
-
-        txStmts.push(
+      if (verdict === 'right') {
+        pay(row.player_id, Ps + Pp, 'post_win', 'Your formula was right: stake back plus payout')
+        pay(row.player_id, Vs * doubters.length, 'post_doubter_income', 'Collected stakes from players who doubted you')
+        stmts.push(
           this.env.DB
-            .prepare(`INSERT INTO wallet_transactions (id, player_id, round_id, type, delta, note, created_at)
-                      VALUES (?, ?, ?, ?, ?, ?, ?)`)
-            .bind(crypto.randomUUID(), vote.voter_id, round.id, txType, voterDelta, txNote, now),
+            .prepare('UPDATE players SET total_score = total_score + 1 WHERE id = ?')
+            .bind(row.player_id),
         )
+        for (const v of backers) pay(v.voter_id, Vs + Bp, 'back_win', 'Backed a right formula')
+        // doubters' stakes were collected above and paid to the poster
+      } else if (verdict === 'close') {
+        pay(row.player_id, Ps + Math.round(Pp / 2), 'post_close', 'Right shape, wrong numbers: stake back plus half payout')
+        for (const v of backers) pay(v.voter_id, Vs + Math.round(Bp / 2), 'back_close', 'Backed a nearly-right formula')
+        for (const v of doubters) pay(v.voter_id, Vs, 'doubt_refund', 'Doubted a nearly-right formula: stake refunded')
+      } else {
+        // Poster's stake is kept by the bank; each doubter is paid by the poster
+        pay(row.player_id, -Vs * doubters.length, 'post_doubter_payout', 'Paid players who called out your wrong formula')
+        for (const v of doubters) pay(v.voter_id, 2 * Vs, 'doubt_win', 'Called out a wrong formula')
+        // backers' stakes stay with the bank
       }
     }
 
-    // Apply wallet deltas & score updates
-    for (const [pid, delta] of playerDeltas) {
-      txStmts.push(
-        this.env.DB
-          .prepare('UPDATE players SET wallet = wallet + ? WHERE id = ?')
-          .bind(delta, pid),
-      )
-    }
-
-    // Add base scores to total_score
-    for (const sub of evaluated) {
-      txStmts.push(
-        this.env.DB
-          .prepare('UPDATE players SET total_score = total_score + ? WHERE id = ?')
-          .bind(sub.baseScore, sub.playerId),
-      )
-    }
-
-    // Move phase to results
-    txStmts.push(
+    stmts.push(
       this.env.DB
         .prepare('UPDATE rounds SET phase = ?, phase_ends_at = NULL WHERE id = ?')
         .bind('results', round.id),
     )
 
-    await this.env.DB.batch(txStmts)
+    await this.env.DB.batch(stmts)
 
-    // Build broadcast payload
-    const playerRows = await getPlayersByRoom(this.env.DB, roomId)
-    const playerMap = new Map(playerRows.map((p) => [p.id, p]))
+    const settledRound: Round = { ...round, phase: 'results', phaseEndsAt: null }
+    const [summary, players] = await Promise.all([
+      this.buildSummary(room, settledRound),
+      getPlayersByRoom(this.env.DB, roomId),
+    ])
+    this.broadcast({ type: 'ROUND_RESULTS', summary, players })
 
-    const anonymousVoting = room.config.anonymousVoting
-    const results: RoundResult[] = evaluated.map((sub, idx) => ({
-      submissionId: sub.id,
-      playerId:     sub.playerId,
-      label:        anonymousVoting
-        ? String.fromCharCode(65 + idx)
-        : (playerMap.get(sub.playerId)?.username ?? sub.playerId),
-      features:     sub.features,
-      r2Score:      sub.r2,
-      baseScore:    sub.baseScore,
-      isCorrect:    sub.isCorrect,
-    }))
-
-    const deltas: WalletDelta[] = []
-    for (const [pid, delta] of playerDeltas) {
-      const p = playerMap.get(pid)
-      if (p) {
-        deltas.push({
-          playerId:   pid,
-          username:   p.username,
-          delta,
-          type:       'round_settlement',
-          note:       delta >= 0 ? `+${delta} coins` : `${delta} coins`,
-          // playerRows is fetched AFTER the batch so p.wallet is already updated —
-          // do NOT add delta again here
-          newBalance: p.wallet,
-        })
-      }
-    }
-
-    // Include the full updated player list so clients update wallets immediately
-    this.broadcast({ type: 'ROUND_RESULTS', results, deltas, players: playerRows })
-
-    // Check if game should auto-end
-    const room2 = await getRoomById(this.env.DB, roomId)
-    if (room2?.config.maxRounds) {
-      const completedCount = await this.env.DB
+    if (allowAutoEnd && room.config.maxRounds) {
+      const completed = await this.env.DB
         .prepare('SELECT COUNT(*) as cnt FROM rounds WHERE room_id = ? AND ended_at IS NOT NULL')
         .bind(roomId).first<{ cnt: number }>()
-      // +1 because current round isn't ended yet
-      if ((completedCount?.cnt ?? 0) + 1 >= room2.config.maxRounds) {
-        await this.handleEndGame(roomId)
-      }
+      // +1 because the current round isn't ended yet
+      if ((completed?.cnt ?? 0) + 1 >= room.config.maxRounds) await this.endGame(roomId)
     }
   }
 
-  private async closeRound(roomId: string, round: { id: string }) {
+  /** Results of a settled round, rebuilt from the DB so reconnecting clients see them too. */
+  private async buildSummary(room: Room, round: Round): Promise<RoundSummary> {
+    const puzzle = PUZZLE_MAP.get(round.puzzleId)
+    const [rows, voteCounts, players, deltaRows] = await Promise.all([
+      getSubmissionsForRound(this.env.DB, round.id),
+      getVoteCountsForRound(this.env.DB, round.id),
+      getPlayersByRoom(this.env.DB, room.id),
+      this.env.DB
+        .prepare('SELECT player_id, SUM(delta) as delta FROM wallet_transactions WHERE round_id = ? GROUP BY player_id')
+        .bind(round.id)
+        .all<{ player_id: string; delta: number }>(),
+    ])
+
+    const subs = buildPublicSubmissions(rows, room.config.anonymousVoting)
+    const results: RoundResult[] = subs.map((sub) => {
+      const counts = voteCounts.find((v) => v.submissionId === sub.id)
+      const judgement = puzzle
+        ? judge(sub.expr, puzzle.X, puzzle.y, puzzle.solution)
+        : { verdict: 'wrong' as const, accuracy: 0 }
+      return {
+        submissionId: sub.id,
+        playerId:     sub.playerId,
+        label:        sub.label,
+        expr:         sub.expr,
+        accuracy:     judgement.accuracy,
+        verdict:      judgement.verdict,
+        ups:          counts?.ups ?? 0,
+        downs:        counts?.downs ?? 0,
+      }
+    })
+
+    const playerMap = new Map(players.map((p) => [p.id, p]))
+    const deltas: WalletDelta[] = deltaRows.results.flatMap((r) => {
+      const p = playerMap.get(r.player_id)
+      return p ? [{ playerId: p.id, username: p.username, delta: r.delta, newBalance: p.wallet }] : []
+    })
+
+    return { results, deltas, solution: puzzle?.solution ?? '' }
+  }
+
+  private async closeRound(round: Round) {
     await this.env.DB
       .prepare('UPDATE rounds SET ended_at = ? WHERE id = ?')
       .bind(Date.now(), round.id).run()
-    // Signal clients that the room is back in lobby
     this.broadcast({ type: 'PHASE_CHANGED', phase: 'lobby', endsAt: null })
   }
 
-  // ─── Leaderboard builder ──────────────────────────────────────────────────
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+
+  /** Wallet update + audit-log row, for inclusion in a batch. */
+  private walletStmts(
+    playerId: string, roundId: string, delta: number, type: string, note: string, now: number,
+  ): D1PreparedStatement[] {
+    return [
+      this.env.DB
+        .prepare('UPDATE players SET wallet = wallet + ? WHERE id = ?')
+        .bind(delta, playerId),
+      this.env.DB
+        .prepare(`INSERT INTO wallet_transactions (id, player_id, round_id, type, delta, note, created_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(crypto.randomUUID(), playerId, roundId, type, delta, note, now),
+    ]
+  }
+
+  private async broadcastPlayer(playerId: string) {
+    const player = await getPlayerById(this.env.DB, playerId)
+    if (player) this.broadcast({ type: 'PLAYER_UPDATED', player })
+  }
 
   private async buildLeaderboard(roomId: string): Promise<LeaderboardEntry[]> {
     const players = await getPlayersByRoom(this.env.DB, roomId)
@@ -684,8 +707,6 @@ export class GameRoomDO implements DurableObject {
         totalScore: p.totalScore,
       }))
   }
-
-  // ─── Broadcast helper ─────────────────────────────────────────────────────
 
   private broadcast(message: ServerMessage, excludePlayerId?: string) {
     const data = JSON.stringify(message)

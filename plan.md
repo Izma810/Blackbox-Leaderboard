@@ -10,82 +10,65 @@ A real-time multiplayer game where players are shown a **hidden black-box functi
 
 ```
 LOBBY
-  Players join with a username.
-  Admin configures the round (puzzle, timers, wallet settings).
-  Admin starts the round.
+  Players join with a username. The host picks a puzzle and starts the round.
 
-PHASE 1 — SUBMISSION (timed)
-  All players are shown:
-    - A cryptic description of the puzzle
-    - Data points (x, y) lying on the hidden curve
-    - The list of allowed transforms
-  Each player submits ONE guess: a set of features (transforms applied to x).
-  Submissions are PUBLIC and visible to all players AS THEY COME IN (first-come-first-serve).
-  When a player submits, their answer is immediately broadcast to everyone in the room.
-  This creates a strategic dynamic: submit early to "claim" a feature, but others can see it.
-  The similarity check enforces that no two submissions can be near-identical (Pearson > 0.95),
-  so players cannot simply copy an already-submitted answer.
-  Names shown or hidden depending on the admin's anonymous_voting setting (applies to both phases).
-  Timer ends → or admin force-advances.
+LIVE ROUND (one timer, default 300 s)
+  Everyone sees the puzzle: a description, a scatter plot and the raw (x, y) data.
+  Posting and voting happen at the same time:
+    - POST: a player claims an exact formula, coefficients included
+      (e.g. y = 2x² + 3·sin(x)). One post per player per round. Costs the post stake.
+      A formula is rejected if its predictions are within 2% of an already-claimed
+      formula, so 2x² blocks 2.01x², but 3x² is a different, valid claim.
+    - VOTE: back (▲) or doubt (▼) anyone else's claim. Each vote costs the vote
+      stake; each player has votes_per_round votes. Vote counts are public and live.
+  Stakes leave the wallet immediately. The timer ending (or the host) closes the round.
 
-PHASE 2 — VOTING (timed)
-  No new reveals — submissions were already visible during Phase 1.
-  Each player gets votes_per_round votes to distribute across other players' submissions.
-  Each vote is either UP or DOWN.
-  A player cannot vote on their own submission.
-  Vote counts are shown in real-time. P&L is NOT shown yet.
-  Timer ends → or admin force-advances.
-
-RESULTS PHASE
-  Server evaluates each submission:
-    - Applies submitted transforms to puzzle data
-    - Fits linear regression → learns coefficient automatically
-    - Computes R² score → determines correctness
-  Wallet changes settled atomically.
-  All deltas revealed to players (who won/lost what and why).
-  Round score added to each player's total_score.
+RESULTS
+  Every claim is judged against the data, the hidden formula is revealed,
+  and all stakes are settled in one D1 batch.
 
 LOBBY (next round) or FINISHED
-  Admin starts another round with a different puzzle, OR
-  Admin ends the game → Final Leaderboard shown to all players.
-  Game also auto-ends if max_rounds is reached (if configured).
+  The host starts another round, or ends the game → final leaderboard by wallet.
 ```
 
 ---
 
-## Scoring System
+## Formulas
 
-### Phase 1 — Submission Score (added to total_score)
+Players type formulas: `2x^2 + 3sin(x)`, `x1/x2`, `sqrt(x1^2 + x2^2)`, `4sin(2pi x/7)`.
+Implicit multiplication, `^`/`**`, `π`, `√`, `²`/`³` all work. The parser lives in
+`shared/expression.ts` and is used by both the worker (judging) and the frontend
+(live preview + error messages), so the two can never disagree.
 
-Players submit a set of feature transforms. The server:
-1. Applies those transforms to the puzzle's x-values to build a feature matrix X
-2. Fits linear regression: `β = (XᵀX)⁻¹Xᵀy` (learns coefficients automatically)
-3. Computes R² = `1 - SS_res / SS_tot`
+## Judging
 
-| R² | Score |
-|----|-------|
-| ≥ 0.92 | 100 + quality bonus up to 50 (scales from 0.92→1.0) |
-| < 0.92, power-family wrong exponent | `100 / |submitted_power − correct_power|` (partial) |
-| Otherwise | 0 |
+A claim's predictions p are compared with the true y using
+`dist(p, y) = ‖p − y‖ / ‖y − mean(y)‖` (= √(1 − R²)).
 
-Score is never negative.
+- **Right**: `dist ≤ 0.02`.
+- **Close**: not right, but refitting the claim's own coefficients plus a constant
+  makes it right, i.e. right functions with wrong numbers (3x² + 1 when the answer is 2x²).
+  Only if it uses no more terms than the real answer, so listing every function doesn't qualify.
+- **Wrong**: anything else.
+- **Duplicate** of an existing claim q if `dist(p, q) < 0.02`, so x·x is blocked once x² is taken.
 
-### Phase 2 — Wallet Settlement
+See `src/game/formula.ts`.
 
-For each submission, after voting phase ends:
+## Settlement
 
-| Condition | Who | Effect |
-|---|---|---|
-| Submission correct (R² ≥ 0.92) | Poster | `+poster_reward` from platform |
-| Submission correct | Upvoters | `+voter_reward` each from platform |
-| Submission correct | Downvoters | `-voter_reward` each → paid to poster |
-| Submission wrong | Poster | `-poster_reward` to platform |
-| Submission wrong | Downvoters | `+voter_reward` each from platform |
-| Submission wrong | Upvoters | `-voter_reward` each to platform |
+Ps = post stake (100), Pp = post payout (100), Vs = vote stake (50),
+Bp = back payout (120, must be > Pp). Stakes are paid up front.
 
-The poster always deals in a larger amount than voters.
-All wallet changes are applied in a single atomic D1 transaction.
-Changes are hidden from players until the Results phase.
+| You…         | Right                               | Close    | Wrong                               |
+|--------------|-------------------------------------|----------|-------------------------------------|
+| posted it    | +Pp, plus Vs from every doubter     | +Pp/2    | −Ps, and pay every doubter Vs       |
+| backed it ▲  | +Bp                                 | +Bp/2    | −Vs                                 |
+| doubted it ▼ | −Vs, paid to the poster             | refunded | +Vs, paid by the poster             |
+
+## Hints
+
+Each puzzle has two hints, vaguest first. A player can buy them one at a time
+during a live round (hint cost, default 40). Only the buyer sees them.
 
 ---
 

@@ -2,7 +2,11 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import type { LeaderboardEntry } from '../types'
 
-const MEDAL: Record<number, string> = { 1: '🥇', 2: '🥈', 3: '🥉' }
+const PODIUM = [
+  { place: 2, height: 'h-28', tone: 'bg-white' },
+  { place: 1, height: 'h-40', tone: 'bg-accent' },
+  { place: 3, height: 'h-20', tone: 'bg-white' },
+]
 
 export default function FinalLeaderboard() {
   const { roomId } = useParams<{ roomId: string }>()
@@ -26,42 +30,30 @@ export default function FinalLeaderboard() {
   }, [roomId])
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center text-zinc-500">
-        Loading leaderboard…
-      </div>
-    )
+    return <div className="flex min-h-screen items-center justify-center text-ink-3">Loading leaderboard…</div>
   }
 
   return (
-    <div className="min-h-screen p-6 max-w-2xl mx-auto flex flex-col gap-8">
-      {/* Header */}
+    <div className="mx-auto flex min-h-screen max-w-3xl flex-col gap-10 px-6 py-12">
       <div className="text-center">
-        <div className="text-zinc-500 text-sm uppercase tracking-widest mb-2">Game Over</div>
-        <h1 className="text-3xl font-bold text-zinc-100">{roomName}</h1>
-        <p className="text-zinc-500 mt-2 text-sm">Final Leaderboard</p>
+        <div className="eyebrow mb-2">Final standings</div>
+        <h1 className="text-4xl font-bold sm:text-5xl">{roomName}</h1>
       </div>
 
-      {/* Top 3 podium */}
-      {entries.length >= 1 && (
-        <div className="flex items-end justify-center gap-4">
-          {[entries[1], entries[0], entries[2]].map((entry, idx) => {
-            if (!entry) return <div key={idx} className="w-24" />
-            const heights = ['h-20', 'h-28', 'h-16']
+      {entries.length > 0 && (
+        <div className="flex items-end justify-center gap-3 sm:gap-5">
+          {PODIUM.map(({ place, height, tone }) => {
+            const entry = entries[place - 1]
+            if (!entry) return <div key={place} className="w-28 sm:w-36" />
             const isMe = entry.playerId === myPlayerId
             return (
-              <div key={entry.playerId} className="flex flex-col items-center gap-2 w-28">
-                <div className="text-2xl">{MEDAL[entry.rank] ?? ''}</div>
-                <div
-                  className={`w-full rounded-t-lg ${heights[idx]} flex items-center justify-center
-                    ${isMe ? 'bg-brand-500/30 border border-brand-500/50' : 'bg-zinc-800 border border-zinc-700'}`}
-                >
-                  <div className="text-center">
-                    <div className={`font-bold text-sm ${isMe ? 'text-brand-400' : 'text-zinc-300'}`}>
-                      {entry.username}
-                    </div>
-                    <div className="text-xs text-zinc-500 tabular-nums">{entry.wallet.toLocaleString()}</div>
-                  </div>
+              <div key={place} className="flex w-28 flex-col items-center gap-3 animate-slide-up sm:w-36">
+                <div className="text-center">
+                  <div className="truncate font-display text-lg font-semibold">{isMe ? 'You' : entry.username}</div>
+                  <div className="tabular text-sm text-ink-3">{entry.wallet.toLocaleString()} coins</div>
+                </div>
+                <div className={`flex w-full ${height} items-start justify-center rounded-t-2xl border-2 border-ink pt-3 shadow-pop ${tone}`}>
+                  <span className="font-display text-3xl font-bold">{place}</span>
                 </div>
               </div>
             )
@@ -69,37 +61,29 @@ export default function FinalLeaderboard() {
         </div>
       )}
 
-      {/* Full table */}
       <div className="card overflow-hidden p-0">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-zinc-800/80">
-              <th className="px-4 py-3 text-left text-zinc-400 font-medium w-12">Rank</th>
-              <th className="px-4 py-3 text-left text-zinc-400 font-medium">Player</th>
-              <th className="px-4 py-3 text-right text-zinc-400 font-medium">Wallet</th>
-              <th className="px-4 py-3 text-right text-zinc-400 font-medium">Score</th>
+        <table className="tabular w-full">
+          <thead className="bg-paper text-sm">
+            <tr>
+              <th className="px-5 py-3 text-left font-semibold text-ink-3">#</th>
+              <th className="px-5 py-3 text-left font-semibold text-ink-3">Player</th>
+              <th className="px-5 py-3 text-right font-semibold text-ink-3">Correct claims</th>
+              <th className="px-5 py-3 text-right font-semibold text-ink-3">Wallet</th>
             </tr>
           </thead>
           <tbody>
             {entries.map((entry) => {
               const isMe = entry.playerId === myPlayerId
               return (
-                <tr
-                  key={entry.playerId}
-                  className={`border-t border-zinc-800/50 ${isMe ? 'bg-brand-500/5' : ''}`}
-                >
-                  <td className="px-4 py-3 text-zinc-500 tabular-nums">
-                    {MEDAL[entry.rank] ?? `#${entry.rank}`}
-                  </td>
-                  <td className={`px-4 py-3 font-medium ${isMe ? 'text-brand-400' : 'text-zinc-300'}`}>
+                <tr key={entry.playerId} className={`border-t border-line ${isMe ? 'bg-accent-soft/60' : ''}`}>
+                  <td className="px-5 py-3.5 font-semibold text-ink-3">{entry.rank}</td>
+                  <td className="px-5 py-3.5 font-semibold">
                     {entry.username}
-                    {isMe && <span className="text-zinc-500 text-xs ml-1">(you)</span>}
+                    {isMe && <span className="ml-2 chip-accent">you</span>}
                   </td>
-                  <td className="px-4 py-3 text-right text-zinc-300 font-bold tabular-nums">
+                  <td className="px-5 py-3.5 text-right text-ink-2">{entry.totalScore}</td>
+                  <td className="px-5 py-3.5 text-right font-display text-lg font-semibold">
                     {entry.wallet.toLocaleString()}
-                  </td>
-                  <td className="px-4 py-3 text-right text-zinc-500 tabular-nums">
-                    {entry.totalScore}
                   </td>
                 </tr>
               )
@@ -109,7 +93,7 @@ export default function FinalLeaderboard() {
       </div>
 
       <button onClick={() => navigate('/')} className="btn-secondary mx-auto">
-        Back to Home
+        Back to home
       </button>
     </div>
   )

@@ -7,54 +7,103 @@
     box-sizing: border-box;
   }
 
+  html {
+    font-feature-settings: 'cv11', 'ss01';
+  }
+
   body {
-    @apply bg-zinc-950 text-zinc-100;
+    @apply bg-paper text-ink;
+    font-size: 15px;
+    line-height: 1.55;
+  }
+
+  h1, h2, h3 {
+    @apply font-display tracking-tight;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-4 ring-accent/40;
+  }
+
+  ::selection {
+    @apply bg-accent-soft text-ink;
   }
 
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
-    @apply bg-zinc-900;
+    background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-zinc-600 rounded-full;
+    @apply bg-line rounded-full;
   }
 }
 
 @layer components {
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium
-           transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed
-           focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-zinc-950;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border-2 border-ink px-5 py-2.5
+           font-semibold text-[15px] leading-none transition-all duration-150 select-none
+           disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  /* Raised buttons sink into their shadow when pressed */
+  .btn-raised {
+    @apply shadow-pop hover:-translate-x-px hover:-translate-y-px hover:shadow-pop-lg
+           active:translate-x-[3px] active:translate-y-[3px] active:shadow-none
+           disabled:translate-x-0 disabled:translate-y-0 disabled:shadow-pop;
   }
   .btn-primary {
-    @apply btn bg-brand-500 hover:bg-brand-600 text-white focus:ring-brand-500;
+    @apply btn btn-raised bg-accent text-ink;
   }
   .btn-secondary {
-    @apply btn bg-zinc-800 hover:bg-zinc-700 text-zinc-100 focus:ring-zinc-600;
+    @apply btn btn-raised bg-white text-ink;
   }
   .btn-danger {
-    @apply btn bg-red-600 hover:bg-red-700 text-white focus:ring-red-500;
+    @apply btn btn-raised bg-down text-white;
   }
   .btn-ghost {
-    @apply btn bg-transparent hover:bg-zinc-800 text-zinc-300 hover:text-zinc-100;
+    @apply btn border-transparent bg-transparent text-ink-2 hover:bg-ink/5 hover:text-ink;
   }
+
   .card {
-    @apply bg-zinc-900 border border-zinc-800 rounded-xl p-4;
+    @apply rounded-2xl border border-line bg-white p-6 shadow-soft;
   }
+  .card-pop {
+    @apply rounded-2xl border-2 border-ink bg-white p-6 shadow-pop;
+  }
+
   .input {
-    @apply w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-100
-           placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-brand-500
-           focus:border-transparent transition-colors;
+    @apply w-full rounded-xl border-2 border-line bg-white px-4 py-3 text-ink placeholder-ink-4
+           transition-colors focus:border-ink focus:outline-none focus:ring-4 focus:ring-accent/25;
   }
-  .badge {
-    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+  .select {
+    @apply input cursor-pointer appearance-none bg-no-repeat pr-10;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5l5-5' fill='none' stroke='%2317150F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-position: right 14px center;
   }
-  .badge-green  { @apply badge bg-green-500/20 text-green-400; }
-  .badge-red    { @apply badge bg-red-500/20 text-red-400; }
-  .badge-yellow { @apply badge bg-yellow-500/20 text-yellow-400; }
-  .badge-blue   { @apply badge bg-blue-500/20 text-blue-400; }
-  .badge-zinc   { @apply badge bg-zinc-700 text-zinc-300; }
+
+  .label {
+    @apply text-sm font-medium text-ink-2;
+  }
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-[0.14em] text-ink-3;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold;
+  }
+  .chip-neutral { @apply chip bg-ink/5 text-ink-2; }
+  .chip-accent  { @apply chip bg-accent-soft text-accent-dark; }
+  .chip-up      { @apply chip bg-up-soft text-up; }
+  .chip-down    { @apply chip bg-down-soft text-down; }
+  .chip-cobalt  { @apply chip bg-cobalt-soft text-cobalt; }
+
+  .alert-error {
+    @apply rounded-xl border border-down/25 bg-down-soft px-4 py-3 text-sm font-medium text-down;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
 }

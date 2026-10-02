@@ -9,9 +9,12 @@ CREATE TABLE IF NOT EXISTS rooms (
   max_rounds        INTEGER,
   starting_wallet   INTEGER NOT NULL DEFAULT 1000,
   phase1_secs       INTEGER NOT NULL DEFAULT 300,
-  phase2_secs       INTEGER NOT NULL DEFAULT 180,
-  poster_reward     INTEGER NOT NULL DEFAULT 200,
-  voter_reward      INTEGER NOT NULL DEFAULT 50,
+  phase2_secs       INTEGER NOT NULL DEFAULT 180,   -- unused since posting and voting merged
+  poster_reward     INTEGER NOT NULL DEFAULT 100,   -- post stake
+  voter_reward      INTEGER NOT NULL DEFAULT 50,    -- vote stake
+  post_payout       INTEGER NOT NULL DEFAULT 100,   -- bank pays a right poster
+  back_payout       INTEGER NOT NULL DEFAULT 120,   -- bank pays a right backer (> post_payout)
+  hint_cost         INTEGER NOT NULL DEFAULT 40,
   votes_per_round   INTEGER NOT NULL DEFAULT 3,
   anonymous_voting  INTEGER NOT NULL DEFAULT 0,
   created_at        INTEGER NOT NULL
@@ -60,7 +63,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   id            TEXT    PRIMARY KEY,
   round_id      TEXT    NOT NULL REFERENCES rounds(id),
   player_id     TEXT    NOT NULL REFERENCES players(id),
-  features_json TEXT    NOT NULL,
+  features_json TEXT    NOT NULL,                   -- the formula as typed
   r2_score      REAL,
   base_score    INTEGER NOT NULL DEFAULT 0,
   is_correct    INTEGER NOT NULL DEFAULT 0,

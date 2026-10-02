@@ -1,30 +1,57 @@
 import type { Config } from 'tailwindcss'
 
 export default {
-  content: ['./index.html', './src/**/*.{ts,tsx}'],
+  // relative: resolve these globs from this file, not from wherever Vite was started
+  content: { relative: true, files: ['./index.html', './src/**/*.{ts,tsx}'] },
   theme: {
     extend: {
       fontFamily: {
-        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans:    ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+        display: ['Poppins', 'Inter', 'system-ui', 'sans-serif'],
       },
       colors: {
-        brand: {
-          50:  '#f0fdf4',
-          100: '#dcfce7',
-          400: '#4ade80',
-          500: '#22c55e',
-          600: '#16a34a',
-          700: '#15803d',
+        paper: '#F5F2EA',
+        line:  '#E4DFD3',
+        ink: {
+          DEFAULT: '#17150F',
+          2: '#3E3A32',
+          3: '#6B665B',
+          4: '#9C968A',
+        },
+        accent: {
+          DEFAULT: '#FF6A2B',
+          dark:    '#E5531A',
+          soft:    '#FFE7DB',
+        },
+        up: {
+          DEFAULT: '#138A5A',
+          soft:    '#DCF2E7',
+        },
+        down: {
+          DEFAULT: '#D93A40',
+          soft:    '#FBE1E1',
+        },
+        cobalt: {
+          DEFAULT: '#3355E8',
+          soft:    '#E3E8FD',
         },
       },
+      boxShadow: {
+        pop:      '3px 3px 0 0 #17150F',
+        'pop-lg': '5px 5px 0 0 #17150F',
+        soft:     '0 1px 2px rgba(23,21,15,0.06), 0 8px 24px -12px rgba(23,21,15,0.18)',
+      },
       animation: {
-        'pulse-slow': 'pulse 3s ease-in-out infinite',
-        'fade-in':    'fadeIn 0.3s ease-out',
-        'slide-up':   'slideUp 0.3s ease-out',
+        'fade-in':  'fadeIn 0.25s ease-out',
+        'slide-up': 'slideUp 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)',
+        'pop-in':   'popIn 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)',
+        flash:      'flash 1.2s ease-out',
       },
       keyframes: {
         fadeIn:  { from: { opacity: '0' }, to: { opacity: '1' } },
-        slideUp: { from: { opacity: '0', transform: 'translateY(8px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
+        slideUp: { from: { opacity: '0', transform: 'translateY(10px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
+        popIn:   { '0%': { opacity: '0', transform: 'scale(0.96)' }, '100%': { opacity: '1', transform: 'scale(1)' } },
+        flash:   { '0%, 40%': { boxShadow: '0 0 0 4px rgba(255,106,43,0.55)' }, '100%': { boxShadow: '0 0 0 0 rgba(255,106,43,0)' } },
       },
     },
   },

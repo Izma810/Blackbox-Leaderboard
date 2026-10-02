@@ -12,6 +12,6 @@
     "jsx": "react-jsx",
     "outDir": "./dist"
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "shared/**/*"],
   "exclude": ["node_modules", "frontend"]
 }

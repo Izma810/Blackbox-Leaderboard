@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
+import type { RoomState } from '../types'
+import { Formula } from '../lib/formula'
+import Timer from '../components/Timer'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -11,50 +14,29 @@ interface PuzzleInfo {
   columns: string[]
 }
 
-interface AdminRoomState {
-  room: {
-    id: string
-    name: string
-    status: string
-    config: {
-      phase1Secs: number
-      phase2Secs: number
-      posterReward: number
-      voterReward: number
-      votesPerRound: number
-      anonymousVoting: boolean
-      maxRounds: number | null
-      startingWallet: number
-    }
-  }
-  players: Array<{
-    id: string; username: string; wallet: number
-    totalScore: number; isConnected: boolean
-  }>
-  currentRound: {
-    id: string; phase: string; puzzleId: string
-    roundNumber: number; phaseEndsAt: number | null
-  } | null
-  submissions: Array<{ id: string; label: string; features: unknown[]; playerId: string }>
-  roundNumber: number
-  correctAnswer: {
-    solutionFeatures: unknown[]
-    correctPowerMap: Record<string, number>
-  } | null
+type AdminRoomState = RoomState & {
+  correctAnswer: { solution: string; hints: string[] } | null
 }
 
 interface SavedRoom { id: string; name: string }
 
 const SESSION_KEY = 'adminPassword'
 const ROOMS_KEY   = 'adminRooms'
-const DIFF_LABEL: Record<number, string> = { 1: 'Beginner', 2: 'Intermediate', 3: 'Challenge' }
-const DIFF_COLOR: Record<number, string>  = { 1: 'badge-green', 2: 'badge-yellow', 3: 'badge-red' }
+const DIFFICULTY: Record<number, { label: string; className: string }> = {
+  1: { label: 'Warm-up', className: 'chip-up' },
+  2: { label: 'Tricky',  className: 'chip-accent' },
+  3: { label: 'Boss',    className: 'chip-down' },
+}
+const PHASE_LABEL: Record<string, { label: string; className: string }> = {
+  lobby:      { label: 'Lobby',    className: 'chip-neutral' },
+  submission: { label: 'Live',     className: 'chip-accent' },
+  results:    { label: 'Results',  className: 'chip-up' },
+  finished:   { label: 'Finished', className: 'chip-neutral' },
+}
 
 // ─── Root component ───────────────────────────────────────────────────────────
 
 export default function Admin() {
-  const navigate = useNavigate()
-
   // Master password — stored in sessionStorage (cleared on tab close)
   const [password, setPassword] = useState<string>(
     () => sessionStorage.getItem(SESSION_KEY) ?? '',
@@ -85,7 +67,7 @@ export default function Admin() {
     )
   }
 
-  return <AdminPanel password={password} onLogout={handleLogout} navigate={navigate} />
+  return <AdminPanel password={password} onLogout={handleLogout} />
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -118,7 +100,6 @@ function saveRoom(room: SavedRoom) {
 // ─── Login page ───────────────────────────────────────────────────────────────
 
 function LoginPage({ onSuccess }: { onSuccess: (pwd: string) => void }) {
-  const navigate = useNavigate()
   const [input, setInput]     = useState('')
   const [error, setError]     = useState('')
   const [loading, setLoading] = useState(false)
@@ -141,82 +122,62 @@ function LoginPage({ onSuccess }: { onSuccess: (pwd: string) => void }) {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6 gap-8">
+    <div className="flex min-h-screen flex-col items-center justify-center gap-8 p-6">
       <div className="text-center">
-        <div className="text-zinc-600 text-xs uppercase tracking-widest mb-2">Restricted area</div>
-        <h1 className="text-2xl font-bold text-zinc-100">Admin Login</h1>
-        <p className="text-zinc-500 text-sm mt-1 max-w-xs mx-auto">
-          This area is for instructors only. Players should join from the home page.
+        <div className="eyebrow mb-2">Host panel</div>
+        <h1 className="text-4xl font-bold">Run a game</h1>
+        <p className="mt-2 max-w-xs text-ink-3">
+          For hosts only. Players join from the home page with a room code.
         </p>
       </div>
 
-      <form onSubmit={handleSubmit} className="card w-full max-w-xs flex flex-col gap-4">
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="pwd" className="text-xs text-zinc-500">Admin password</label>
+      <form onSubmit={handleSubmit} className="card-pop flex w-full max-w-sm flex-col gap-5">
+        <label className="flex flex-col gap-2">
+          <span className="label">Host password</span>
           <input
-            id="pwd"
             type="password"
             className="input"
-            placeholder="Enter admin password"
+            placeholder="Enter password"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             autoFocus
             autoComplete="current-password"
           />
-        </div>
+        </label>
 
-        {error && (
-          <div className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-2.5 text-center">
-            {error}
-          </div>
-        )}
+        {error && <div className="alert-error text-center" role="alert">{error}</div>}
 
-        <button type="submit" className="btn-primary w-full" disabled={loading || !input}>
-          {loading ? 'Verifying…' : 'Login'}
+        <button type="submit" className="btn-primary w-full py-3" disabled={loading || !input}>
+          {loading ? 'Checking…' : 'Enter'}
         </button>
       </form>
 
-      <button
-        className="text-zinc-700 hover:text-zinc-500 text-xs transition-colors"
-        onClick={() => navigate('/')}
-      >
-        ← Back to player join page
-      </button>
+      <Link to="/" className="text-sm text-ink-3 hover:text-ink">← Back to player page</Link>
     </div>
   )
 }
 
 // ─── Admin panel (after login) ────────────────────────────────────────────────
 
-function AdminPanel({
-  password,
-  onLogout,
-  navigate,
-}: {
-  password: string
-  onLogout: () => void
-  navigate: ReturnType<typeof useNavigate>
-}) {
-  // Sidebar: saved rooms list + create new
-  const [savedRooms, setSavedRooms]       = useState<SavedRoom[]>(getSavedRooms)
-  const [activeRoomId, setActiveRoomId]   = useState<string>(getSavedRooms()[0]?.id ?? '')
+function AdminPanel({ password, onLogout }: { password: string; onLogout: () => void }) {
+  const [savedRooms, setSavedRooms]     = useState<SavedRoom[]>(getSavedRooms)
+  const [activeRoomId, setActiveRoomId] = useState<string>(getSavedRooms()[0]?.id ?? '')
 
-  // Create room form
-  const [showCreate, setShowCreate]   = useState(false)
+  const [showCreate, setShowCreate]   = useState(savedRooms.length === 0)
   const [newRoomName, setNewRoomName] = useState('')
   const [creating, setCreating]       = useState(false)
   const [createErr, setCreateErr]     = useState('')
 
-  // Active room state
-  const [roomState, setRoomState]         = useState<AdminRoomState | null>(null)
-  const [puzzles, setPuzzles]             = useState<PuzzleInfo[]>([])
+  const [roomState, setRoomState]           = useState<AdminRoomState | null>(null)
+  const [puzzles, setPuzzles]               = useState<PuzzleInfo[]>([])
   const [selectedPuzzle, setSelectedPuzzle] = useState('')
-  const [actionErr, setActionErr]         = useState('')
-  const [loading, setLoading]             = useState(false)
-  const [editConfig, setEditConfig]       = useState(false)
-  const [cfgDraft, setCfgDraft]           = useState<Record<string, unknown>>({})
+  const [actionErr, setActionErr]           = useState('')
+  const [loading, setLoading]               = useState(false)
+  const [editConfig, setEditConfig]         = useState(false)
+  const [cfgDraft, setCfgDraft]             = useState<Record<string, unknown>>({})
+  const [confirmEnd, setConfirmEnd]         = useState(false)
+  const [copied, setCopied]                 = useState(false)
 
-  // Load puzzle list once
   useEffect(() => {
     fetch('/api/admin/puzzles')
       .then((r) => r.json())
@@ -224,7 +185,7 @@ function AdminPanel({
       .catch(() => {})
   }, [])
 
-  // Poll active room state every 3 s
+  // Poll active room state every 2 s
   const fetchState = useCallback(async () => {
     if (!activeRoomId) return
     try {
@@ -240,13 +201,13 @@ function AdminPanel({
     setRoomState(null)
     setActionErr('')
     setEditConfig(false)
+    setConfirmEnd(false)
     if (!activeRoomId) return
     fetchState()
-    const id = setInterval(fetchState, 3000)
+    const id = setInterval(fetchState, 2000)
     return () => clearInterval(id)
   }, [activeRoomId, fetchState])
 
-  // ── Create room ────────────────────────────────────────────────────────────
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
     setCreateErr('')
@@ -261,8 +222,7 @@ function AdminPanel({
       const data = await res.json() as { id?: string; error?: string }
       if (!res.ok || !data.id) { setCreateErr(data.error ?? 'Failed'); return }
 
-      const newRoom: SavedRoom = { id: data.id, name: newRoomName.trim() }
-      saveRoom(newRoom)
+      saveRoom({ id: data.id, name: newRoomName.trim() })
       setSavedRooms(getSavedRooms())
       setActiveRoomId(data.id)
       setNewRoomName('')
@@ -274,7 +234,6 @@ function AdminPanel({
     }
   }
 
-  // ── Room action ────────────────────────────────────────────────────────────
   async function doAction(action: string, body: unknown = {}) {
     setActionErr('')
     setLoading(true)
@@ -313,354 +272,357 @@ function AdminPanel({
     }
   }
 
-  const cfg   = roomState?.room.config
-  const phase = roomState?.currentRound?.phase ?? 'lobby'
-  const phaseColor: Record<string, string> = {
-    lobby: 'badge-zinc', submission: 'badge-yellow',
-    voting: 'badge-blue', results: 'badge-green', finished: 'badge-zinc',
-  }
+  const cfg = roomState?.room.config
+  const phase = roomState?.room.status === 'finished' ? 'finished' : roomState?.currentRound?.phase ?? 'lobby'
+  const phaseInfo = PHASE_LABEL[phase] ?? PHASE_LABEL.lobby
+  const players = roomState ? [...roomState.players].sort((a, b) => b.wallet - a.wallet) : []
 
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Top bar */}
-      <header className="border-b border-zinc-800 px-4 py-3 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <span className="text-zinc-500 text-xs font-mono uppercase tracking-wider">Admin Panel</span>
-          {roomState && (
-            <>
-              <span className="text-zinc-700">·</span>
-              <span className="text-zinc-300 font-semibold">{roomState.room.name}</span>
-              <span className={`badge ${phaseColor[phase]}`}>{phase}</span>
-              <span className="text-zinc-600 text-xs">Round {roomState.roundNumber}</span>
-            </>
-          )}
+    <div className="flex min-h-screen flex-col">
+      <header className="sticky top-0 z-30 border-b border-line bg-paper/90 backdrop-blur">
+        <div className="flex items-center justify-between gap-4 px-4 py-3 sm:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="font-display text-lg font-bold tracking-tight">blackbox</span>
+            <span className="chip-neutral">Host</span>
+            {roomState && (
+              <>
+                <span className="h-5 w-px bg-line" aria-hidden />
+                <span className="truncate font-semibold">{roomState.room.name}</span>
+                <span className={phaseInfo.className}>{phaseInfo.label}</span>
+                {roomState.currentRound && <span className="text-sm text-ink-3">Round {roomState.roundNumber}</span>}
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {phase === 'submission' && <Timer endsAt={roomState?.currentRound?.phaseEndsAt ?? null} />}
+            <button onClick={onLogout} className="btn-ghost px-3 py-2 text-sm">Sign out</button>
+          </div>
         </div>
-        <button
-          onClick={onLogout}
-          className="text-zinc-600 hover:text-zinc-400 text-xs transition-colors"
-        >
-          Sign out
-        </button>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-
-        {/* ── Left sidebar: room list ─────────────────────────────────────── */}
-        <aside className="w-56 border-r border-zinc-800 flex flex-col overflow-y-auto shrink-0">
-          <div className="p-3 border-b border-zinc-800">
-            <button
-              onClick={() => setShowCreate(!showCreate)}
-              className="btn-primary w-full text-sm py-1.5"
-            >
-              {showCreate ? '✕ Cancel' : '+ New Room'}
-            </button>
-          </div>
+      <div className="flex flex-1 flex-col md:flex-row">
+        {/* ── Rooms ─────────────────────────────────────────────────────────── */}
+        <aside className="flex shrink-0 flex-col gap-3 border-b border-line p-4 md:w-64 md:border-b-0 md:border-r">
+          <button onClick={() => setShowCreate(!showCreate)} className="btn-primary w-full py-2.5">
+            {showCreate ? 'Cancel' : '+ New room'}
+          </button>
 
           {showCreate && (
-            <form onSubmit={handleCreate} className="p-3 border-b border-zinc-800 flex flex-col gap-2">
+            <form onSubmit={handleCreate} className="flex flex-col gap-2 animate-fade-in">
               <input
-                className="input text-sm py-1.5"
+                className="input py-2.5"
                 placeholder="Room name"
                 value={newRoomName}
                 onChange={(e) => setNewRoomName(e.target.value)}
                 maxLength={50}
                 autoFocus
               />
-              {createErr && <p className="text-red-400 text-xs">{createErr}</p>}
-              <button type="submit" className="btn-secondary text-xs py-1" disabled={creating || !newRoomName.trim()}>
-                {creating ? 'Creating…' : 'Create'}
+              {createErr && <p className="text-sm text-down">{createErr}</p>}
+              <button type="submit" className="btn-secondary py-2" disabled={creating || !newRoomName.trim()}>
+                {creating ? 'Creating…' : 'Create room'}
               </button>
             </form>
           )}
 
-          <div className="flex-1 overflow-y-auto py-1">
-            {savedRooms.length === 0 && (
-              <p className="text-zinc-600 text-xs italic px-3 py-4 text-center">
-                No rooms yet.<br />Create one above.
-              </p>
+          <nav className="flex flex-col gap-1" aria-label="Your rooms">
+            {savedRooms.length === 0 && !showCreate && (
+              <p className="px-2 py-4 text-center text-sm text-ink-3">No rooms yet.</p>
             )}
             {savedRooms.map((r) => (
               <button
                 key={r.id}
                 onClick={() => setActiveRoomId(r.id)}
-                className={`
-                  w-full text-left px-3 py-2.5 border-b border-zinc-800/50 text-sm transition-colors
-                  ${activeRoomId === r.id
-                    ? 'bg-brand-500/10 text-brand-400 border-l-2 border-l-brand-500'
-                    : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-300'}
-                `}
+                aria-current={activeRoomId === r.id}
+                className={`rounded-xl px-3 py-2.5 text-left transition-colors ${
+                  activeRoomId === r.id ? 'bg-ink text-white' : 'hover:bg-ink/5'
+                }`}
               >
-                <div className="font-medium truncate">{r.name}</div>
-                <div className="text-xs text-zinc-600 font-mono truncate">{r.id}</div>
+                <div className="truncate font-semibold">{r.name}</div>
+                <div className={`tabular truncate text-xs ${activeRoomId === r.id ? 'text-white/60' : 'text-ink-4'}`}>{r.id}</div>
               </button>
             ))}
-          </div>
+          </nav>
         </aside>
 
-        {/* ── Main content ────────────────────────────────────────────────── */}
-        <main className="flex-1 overflow-y-auto p-5 flex flex-col gap-6">
+        {/* ── Main ──────────────────────────────────────────────────────────── */}
+        <main className="flex min-w-0 flex-1 flex-col gap-6 p-4 sm:p-6">
           {!activeRoomId && (
-            <div className="flex-1 flex items-center justify-center text-zinc-600 text-sm italic">
-              Select or create a room
-            </div>
+            <div className="flex flex-1 items-center justify-center text-ink-3">Create a room to get started.</div>
           )}
 
           {activeRoomId && !roomState && (
-            <div className="flex-1 flex items-center justify-center text-zinc-600 text-sm">
-              Loading…
-            </div>
+            <div className="flex flex-1 items-center justify-center text-ink-3">Loading…</div>
           )}
 
           {activeRoomId && roomState && (
             <>
-              {/* Share + action buttons */}
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div className="flex flex-col gap-1.5">
-                  <div className="text-xs text-zinc-500 uppercase tracking-wider">Share room ID with players</div>
-                  <div className="flex items-center gap-2">
-                    <code className="text-brand-400 font-bold text-lg bg-zinc-800 px-3 py-1.5 rounded-lg select-all">
-                      {activeRoomId}
-                    </code>
-                    <button
-                      className="btn-secondary text-xs py-1.5"
-                      onClick={() => navigator.clipboard.writeText(activeRoomId)}
-                    >
-                      Copy
-                    </button>
-                  </div>
-                </div>
+              {/* Share + controls */}
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <button
+                  className="card-pop flex items-center gap-4 px-5 py-3 text-left transition-transform hover:-translate-y-0.5"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(activeRoomId).then(() => {
+                      setCopied(true)
+                      setTimeout(() => setCopied(false), 1500)
+                    }).catch(() => {})
+                  }}
+                >
+                  <span className="eyebrow">Room code</span>
+                  <span className="tabular font-display text-2xl font-semibold tracking-wider">{activeRoomId}</span>
+                  <span className="chip-neutral">{copied ? 'Copied!' : 'Copy'}</span>
+                </button>
 
-                <div className="flex gap-2 flex-wrap">
-                  <button
-                    onClick={() => doAction('advance-phase')}
-                    className="btn-secondary text-sm"
-                    disabled={loading || phase === 'lobby' || phase === 'finished'}
-                  >
-                    Force Next Phase
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (window.confirm('End the game? This shows the final leaderboard to all players.'))
-                        doAction('end-game')
-                    }}
-                    className="btn-danger text-sm"
-                    disabled={loading}
-                  >
-                    End Game
-                  </button>
+                <div className="flex flex-wrap gap-2">
+                  {phase === 'submission' && (
+                    <button onClick={() => doAction('advance-phase')} className="btn-secondary" disabled={loading}>
+                      End round now
+                    </button>
+                  )}
+                  {phase === 'results' && (
+                    <button onClick={() => doAction('advance-phase')} className="btn-secondary" disabled={loading}>
+                      Back to lobby
+                    </button>
+                  )}
+                  {phase !== 'finished' && (
+                    confirmEnd ? (
+                      <>
+                        <button onClick={() => { setConfirmEnd(false); doAction('end-game') }} className="btn-danger" disabled={loading}>
+                          Yes, end the game
+                        </button>
+                        <button onClick={() => setConfirmEnd(false)} className="btn-ghost">Cancel</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setConfirmEnd(true)} className="btn-ghost text-down hover:text-down" disabled={loading}>
+                        End game…
+                      </button>
+                    )
+                  )}
                 </div>
               </div>
 
-              {actionErr && (
-                <div className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3">
-                  {actionErr}
-                </div>
-              )}
+              {actionErr && <div className="alert-error" role="alert">{actionErr}</div>}
 
-              {/* Players + current round */}
-              <div className="grid md:grid-cols-2 gap-4">
-                {/* Players */}
-                <div className="card flex flex-col gap-3">
-                  <div className="text-xs text-zinc-500 uppercase tracking-wider">
-                    Players ({roomState.players.length})
-                  </div>
-                  {roomState.players.length === 0 && (
-                    <p className="text-zinc-600 text-sm italic">Waiting for players to join…</p>
-                  )}
-                  {roomState.players.map((p) => (
-                    <div key={p.id} className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${p.isConnected ? 'bg-brand-400' : 'bg-zinc-600'}`} />
-                        <span className="text-zinc-300 truncate">{p.username}</span>
+              <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
+                <div className="flex min-w-0 flex-col gap-6">
+                  {/* Current round */}
+                  {roomState.currentRound && (
+                    <section className="card flex flex-col gap-5">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="eyebrow mb-1">Round {roomState.roundNumber}</div>
+                          <h2 className="text-xl font-semibold">{roomState.puzzle?.title ?? roomState.currentRound.puzzleId}</h2>
+                        </div>
+                        <span className={phaseInfo.className}>{phaseInfo.label}</span>
                       </div>
-                      <div className="text-right text-xs text-zinc-500 tabular-nums shrink-0 ml-2">
-                        <div className="text-zinc-300 font-medium">{p.wallet.toLocaleString()}</div>
-                        <div>score {p.totalScore}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
 
-                {/* Round info */}
-                <div className="card flex flex-col gap-3">
-                  <div className="text-xs text-zinc-500 uppercase tracking-wider">Current Round</div>
-                  {!roomState.currentRound ? (
-                    <p className="text-zinc-600 text-sm italic">No active round</p>
-                  ) : (
-                    <>
-                      <div className="text-sm">
-                        <span className="text-zinc-500">Puzzle </span>
-                        <span className="text-zinc-200">{roomState.currentRound.puzzleId}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-zinc-500 text-sm">Phase</span>
-                        <span className={`badge ${phaseColor[phase]}`}>{phase}</span>
-                      </div>
                       {roomState.correctAnswer && (
-                        <div className="bg-zinc-800/70 rounded-lg p-3">
-                          <div className="text-xs text-yellow-500/80 uppercase tracking-wider mb-2">
-                            Correct answer — admin only
+                        <div className="rounded-xl border-2 border-dashed border-accent bg-accent-soft/50 px-5 py-4">
+                          <div className="eyebrow mb-1 text-accent-dark">Answer · host only</div>
+                          <div className="font-display text-xl font-medium">
+                            <Formula expr={roomState.correctAnswer.solution} />
                           </div>
-                          {(roomState.correctAnswer.solutionFeatures as unknown[]).map((f, i) => (
-                            <code key={i} className="block text-brand-400 text-sm">
-                              {typeof f === 'string' ? f : JSON.stringify(f)}
-                            </code>
-                          ))}
+                          <ol className="mt-2 flex flex-col gap-1 text-sm text-ink-2">
+                            {roomState.correctAnswer.hints.map((h, i) => (
+                              <li key={i}><span className="font-semibold">Hint {i + 1}:</span> {h}</li>
+                            ))}
+                          </ol>
                         </div>
                       )}
-                      <div className="text-xs text-zinc-500">
-                        Submissions: {roomState.submissions.length}
+
+                      <div>
+                        <div className="eyebrow mb-3">Claims ({roomState.submissions.length})</div>
+                        {roomState.submissions.length === 0 ? (
+                          <p className="text-ink-3">No formulas posted yet.</p>
+                        ) : (
+                          <ul className="flex flex-col divide-y divide-line">
+                            {roomState.submissions.map((s) => {
+                              const c = roomState.voteCounts.find((v) => v.submissionId === s.id)
+                              return (
+                                <li key={s.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                                  <div className="min-w-0">
+                                    <div className="font-display text-lg font-medium"><Formula expr={s.expr} /></div>
+                                    <div className="text-sm text-ink-3">{s.label}</div>
+                                  </div>
+                                  <div className="tabular flex gap-3 text-sm font-semibold">
+                                    <span className="text-up">▲{c?.ups ?? 0}</span>
+                                    <span className="text-down">▼{c?.downs ?? 0}</span>
+                                  </div>
+                                </li>
+                              )
+                            })}
+                          </ul>
+                        )}
                       </div>
-                    </>
+                    </section>
                   )}
-                </div>
-              </div>
 
-              {/* Start next round */}
-              {(phase === 'lobby' || phase === 'results') && (
-                <div className="card flex flex-col gap-4">
-                  <div className="text-xs text-zinc-500 uppercase tracking-wider">
-                    {phase === 'results' ? 'Start Next Round' : 'Start First Round'}
-                  </div>
-
-                  <div className="grid gap-2 max-h-72 overflow-y-auto pr-1">
-                    {puzzles.map((p) => (
-                      <button
-                        key={p.id}
-                        onClick={() => setSelectedPuzzle(p.id === selectedPuzzle ? '' : p.id)}
-                        className={`
-                          text-left px-3 py-2.5 rounded-lg border transition-all text-sm
-                          ${selectedPuzzle === p.id
-                            ? 'border-brand-500 bg-brand-500/10 text-zinc-100'
-                            : 'border-zinc-800 bg-zinc-800/40 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'}
-                        `}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-medium truncate">{p.title}</span>
-                          <span className={`badge text-xs shrink-0 ${DIFF_COLOR[p.difficulty]}`}>
-                            {DIFF_LABEL[p.difficulty]}
-                          </span>
-                        </div>
-                        <div className="text-xs text-zinc-600 mt-0.5">
-                          {p.id} · cols: <span className="text-zinc-500">{p.columns.join(', ')}</span>
-                        </div>
-                        <div className="text-xs text-zinc-600 italic mt-0.5 line-clamp-1">
-                          {p.description}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-
-                  <button
-                    onClick={() => doAction('start-round', { puzzleId: selectedPuzzle })}
-                    className="btn-primary"
-                    disabled={!selectedPuzzle || loading}
-                  >
-                    {loading
-                      ? 'Starting…'
-                      : selectedPuzzle
-                        ? `Start — "${puzzles.find((p) => p.id === selectedPuzzle)?.title ?? selectedPuzzle}"`
-                        : 'Select a puzzle above'}
-                  </button>
-                </div>
-              )}
-
-              {/* Config */}
-              <div className="card flex flex-col gap-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs text-zinc-500 uppercase tracking-wider">Room Config</div>
-                  <button
-                    className="btn-ghost text-xs"
-                    onClick={() => {
-                      if (!editConfig && cfg) {
-                        setCfgDraft({
-                          phase1_secs:      cfg.phase1Secs,
-                          phase2_secs:      cfg.phase2Secs,
-                          poster_reward:    cfg.posterReward,
-                          voter_reward:     cfg.voterReward,
-                          votes_per_round:  cfg.votesPerRound,
-                          anonymous_voting: cfg.anonymousVoting ? 1 : 0,
-                          max_rounds:       cfg.maxRounds,
-                          starting_wallet:  cfg.startingWallet,
-                        })
-                      }
-                      setEditConfig(!editConfig)
-                    }}
-                  >
-                    {editConfig ? 'Cancel' : 'Edit'}
-                  </button>
-                </div>
-
-                {cfg && !editConfig && (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                    {([
-                      ['Phase 1',      `${cfg.phase1Secs}s`],
-                      ['Phase 2',      `${cfg.phase2Secs}s`],
-                      ['Poster ±',     `${cfg.posterReward} coins`],
-                      ['Voter ±',      `${cfg.voterReward} coins`],
-                      ['Votes/round',  String(cfg.votesPerRound)],
-                      ['Start wallet', `${cfg.startingWallet} coins`],
-                      ['Max rounds',   cfg.maxRounds ? String(cfg.maxRounds) : '∞'],
-                      ['Anonymous',    cfg.anonymousVoting ? 'Yes' : 'No'],
-                    ] as [string, string][]).map(([k, v]) => (
-                      <div key={k} className="bg-zinc-800/50 rounded-lg p-2.5">
-                        <div className="text-zinc-600 mb-0.5">{k}</div>
-                        <div className="text-zinc-300 font-medium">{v}</div>
+                  {/* Start round */}
+                  {(phase === 'lobby' || phase === 'results') && (
+                    <section className="card flex flex-col gap-4">
+                      <div>
+                        <div className="eyebrow mb-1">{phase === 'results' ? 'Next round' : 'First round'}</div>
+                        <h2 className="text-xl font-semibold">Pick a puzzle</h2>
                       </div>
-                    ))}
-                  </div>
-                )}
 
-                {editConfig && (
-                  <div className="grid grid-cols-2 gap-3">
-                    {([
-                      ['Phase 1 (secs)',    'phase1_secs'],
-                      ['Phase 2 (secs)',    'phase2_secs'],
-                      ['Poster reward',     'poster_reward'],
-                      ['Voter reward',      'voter_reward'],
-                      ['Votes/round',       'votes_per_round'],
-                      ['Start wallet',      'starting_wallet'],
-                      ['Max rounds (0=∞)',  'max_rounds'],
-                    ] as [string, string][]).map(([label, key]) => (
-                      <label key={key} className="flex flex-col gap-1">
-                        <span className="text-xs text-zinc-500">{label}</span>
-                        <input
-                          type="number"
-                          className="input text-sm py-1.5"
-                          value={String(cfgDraft[key] ?? '')}
-                          onChange={(e) =>
-                            setCfgDraft((d) => ({
-                              ...d,
-                              [key]: e.target.value === '' ? null : Number(e.target.value),
-                            }))
-                          }
-                        />
-                      </label>
-                    ))}
-                    <label className="flex flex-col gap-1">
-                      <span className="text-xs text-zinc-500">Anonymous voting</span>
-                      <select
-                        className="input text-sm py-1.5"
-                        value={String(cfgDraft['anonymous_voting'] ?? 0)}
-                        onChange={(e) =>
-                          setCfgDraft((d) => ({ ...d, anonymous_voting: Number(e.target.value) }))
-                        }
-                      >
-                        <option value="0">No — show usernames</option>
-                        <option value="1">Yes — hide as A/B/C</option>
-                      </select>
-                    </label>
-                    <div className="col-span-2">
+                      <div className="grid max-h-[420px] gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+                        {puzzles.map((p) => {
+                          const d = DIFFICULTY[p.difficulty]
+                          const selected = selectedPuzzle === p.id
+                          return (
+                            <button
+                              key={p.id}
+                              onClick={() => setSelectedPuzzle(selected ? '' : p.id)}
+                              aria-pressed={selected}
+                              className={`rounded-xl border-2 px-4 py-3 text-left transition-all ${
+                                selected ? 'border-ink bg-accent-soft shadow-pop' : 'border-line bg-white hover:border-ink-4'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="truncate font-semibold">{p.title}</span>
+                                {d && <span className={`${d.className} shrink-0`}>{d.label}</span>}
+                              </div>
+                              <div className="mt-1 line-clamp-2 text-sm text-ink-3">{p.description}</div>
+                              <div className="mt-1.5 text-xs text-ink-4">inputs: {p.columns.join(', ')}</div>
+                            </button>
+                          )
+                        })}
+                      </div>
+
                       <button
-                        onClick={saveConfig}
-                        className="btn-primary text-sm w-full"
-                        disabled={loading}
+                        onClick={() => doAction('start-round', { puzzleId: selectedPuzzle })}
+                        className="btn-primary py-3"
+                        disabled={!selectedPuzzle || loading}
                       >
-                        {loading ? 'Saving…' : 'Save Config'}
+                        {loading
+                          ? 'Starting…'
+                          : selectedPuzzle
+                            ? `Start round: ${puzzles.find((p) => p.id === selectedPuzzle)?.title ?? selectedPuzzle}`
+                            : 'Select a puzzle above'}
+                      </button>
+                    </section>
+                  )}
+
+                  {/* Settings */}
+                  <section className="card flex flex-col gap-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xl font-semibold">Room settings</h2>
+                      <button
+                        className="btn-ghost px-3 py-2 text-sm"
+                        disabled={phase === 'submission'}
+                        title={phase === 'submission' ? 'Settings are locked while a round is live' : undefined}
+                        onClick={() => {
+                          if (!editConfig && cfg) {
+                            setCfgDraft({
+                              phase1_secs:      cfg.phase1Secs,
+                              poster_reward:    cfg.postStake,
+                              post_payout:      cfg.postPayout,
+                              voter_reward:     cfg.voteStake,
+                              back_payout:      cfg.backPayout,
+                              hint_cost:        cfg.hintCost,
+                              votes_per_round:  cfg.votesPerRound,
+                              anonymous_voting: cfg.anonymousVoting ? 1 : 0,
+                              max_rounds:       cfg.maxRounds,
+                              starting_wallet:  cfg.startingWallet,
+                            })
+                          }
+                          setEditConfig(!editConfig)
+                        }}
+                      >
+                        {editConfig ? 'Cancel' : 'Edit'}
                       </button>
                     </div>
-                  </div>
-                )}
+
+                    {cfg && !editConfig && (
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        {([
+                          ['Round length',  `${cfg.phase1Secs}s`],
+                          ['Post stake',    `${cfg.postStake}`],
+                          ['Post payout',   `${cfg.postPayout}`],
+                          ['Vote stake',    `${cfg.voteStake}`],
+                          ['Back payout',   `${cfg.backPayout}`],
+                          ['Hint cost',     `${cfg.hintCost}`],
+                          ['Votes / round', String(cfg.votesPerRound)],
+                          ['Start wallet',  `${cfg.startingWallet}`],
+                          ['Max rounds',    cfg.maxRounds ? String(cfg.maxRounds) : '∞'],
+                          ['Anonymous',     cfg.anonymousVoting ? 'Yes' : 'No'],
+                        ] as [string, string][]).map(([k, v]) => (
+                          <div key={k} className="rounded-xl bg-paper px-4 py-3">
+                            <div className="text-xs text-ink-3">{k}</div>
+                            <div className="tabular font-display text-lg font-semibold">{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {editConfig && (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        {([
+                          ['Round length (seconds)', 'phase1_secs'],
+                          ['Post stake (coins)',      'poster_reward'],
+                          ['Post payout, if right',   'post_payout'],
+                          ['Vote stake (coins)',      'voter_reward'],
+                          ['Back payout, if right (must beat post payout)', 'back_payout'],
+                          ['Hint cost (coins)',       'hint_cost'],
+                          ['Votes per round',         'votes_per_round'],
+                          ['Starting wallet',         'starting_wallet'],
+                          ['Max rounds (empty = ∞)',  'max_rounds'],
+                        ] as [string, string][]).map(([label, key]) => (
+                          <label key={key} className="flex flex-col gap-1.5">
+                            <span className="label">{label}</span>
+                            <input
+                              type="number"
+                              className="input py-2.5"
+                              value={String(cfgDraft[key] ?? '')}
+                              onChange={(e) =>
+                                setCfgDraft((d) => ({
+                                  ...d,
+                                  [key]: e.target.value === '' ? null : Number(e.target.value),
+                                }))
+                              }
+                            />
+                          </label>
+                        ))}
+                        <label className="flex flex-col gap-1.5">
+                          <span className="label">Player names on claims</span>
+                          <select
+                            className="select py-2.5"
+                            value={String(cfgDraft['anonymous_voting'] ?? 0)}
+                            onChange={(e) => setCfgDraft((d) => ({ ...d, anonymous_voting: Number(e.target.value) }))}
+                          >
+                            <option value="0">Show names</option>
+                            <option value="1">Hide names (A, B, C…)</option>
+                          </select>
+                        </label>
+                        <div className="sm:col-span-2">
+                          <button onClick={saveConfig} className="btn-primary w-full py-3" disabled={loading}>
+                            {loading ? 'Saving…' : 'Save settings'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </section>
+                </div>
+
+                {/* Players */}
+                <section className="card flex h-fit flex-col gap-3">
+                  <h2 className="text-xl font-semibold">Players ({players.length})</h2>
+                  {players.length === 0 && <p className="text-ink-3">Waiting for players to join…</p>}
+                  <ol className="flex flex-col divide-y divide-line">
+                    {players.map((p, i) => (
+                      <li key={p.id} className="flex items-center justify-between gap-3 py-2.5">
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <span className="tabular w-5 text-sm text-ink-4">{i + 1}</span>
+                          <span
+                            className={`h-2 w-2 shrink-0 rounded-full ${p.isConnected ? 'bg-up' : 'bg-line'}`}
+                            title={p.isConnected ? 'Online' : 'Offline'}
+                          />
+                          <span className="truncate font-medium">{p.username}</span>
+                        </div>
+                        <span className="tabular font-display font-semibold">{p.wallet.toLocaleString()}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
               </div>
             </>
           )}

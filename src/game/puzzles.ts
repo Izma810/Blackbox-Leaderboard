@@ -1,4 +1,4 @@
-import type { Feature, PuzzleData } from '../types'
+import type { PuzzleData } from '../types'
 
 // ─── Seeded PRNG (Mulberry32) ─────────────────────────────────────────────────
 // Deterministic, fast, good statistical properties.
@@ -28,8 +28,10 @@ interface PuzzleDef {
   difficulty: 1 | 2 | 3
   columns: string[]
   generate(rng: () => number, n: number): { X: Record<string, number[]>; y: number[] }
-  solutionFeatures: Feature[]
-  correctPowerMap: Record<string, number>
+  /** The hidden formula, in the same syntax players type — must reproduce generate()'s y */
+  solution: string
+  /** Two hints, vaguest first. Point the way without giving away the answer. */
+  hints: string[]
 }
 
 const PUZZLE_DEFS: PuzzleDef[] = [
@@ -46,8 +48,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 2 * v)
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['identity:x'],
-    correctPowerMap: { x: 1 },
+    solution: '2x',
+    hints: [
+      'Compare y with x row by row. Does the gap between them stay the same, or grow?',
+      'y ÷ x comes out the same on every row.',
+    ],
   },
 
   {
@@ -61,8 +66,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => -3 * v)
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['identity:x'],
-    correctPowerMap: { x: 1 },
+    solution: '-3x',
+    hints: [
+      'When x goes up, which way does y go?',
+      'y ÷ x comes out the same on every row, and it is negative.',
+    ],
   },
 
   {
@@ -76,8 +84,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 2 * v ** 2)
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['square:x'],
-    correctPowerMap: { x: 2 },
+    solution: '2x^2',
+    hints: [
+      'When x doubles, y does more than double. Find two rows where x doubles and check.',
+      'Doubling x multiplies y by 4. Think about powers of x.',
+    ],
   },
 
   {
@@ -91,8 +102,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 4 * Math.sqrt(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['sqrt:x'],
-    correctPowerMap: { x: 0.5 },
+    solution: '4sqrt(x)',
+    hints: [
+      'y keeps growing, but each step adds a little less than the last one.',
+      'Multiplying x by 4 only doubles y.',
+    ],
   },
 
   {
@@ -106,8 +120,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 5 * Math.log(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['log:x'],
-    correctPowerMap: {},
+    solution: '5ln(x)',
+    hints: [
+      'Huge changes in x barely move y. See what happens to y when x is multiplied by 10.',
+      'Every time x is multiplied by the same factor, y goes up by the same amount.',
+    ],
   },
 
   {
@@ -124,8 +141,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x1.map(v => 2 * v)
       return { X: { x1: clean(x1), x2: clean(x2), x3: clean(x3), x4: clean(x4) }, y: clean(y) }
     },
-    solutionFeatures: ['identity:x1'],
-    correctPowerMap: { x1: 1 },
+    solution: '2x1',
+    hints: [
+      'Not every column matters. Plot y against each column, one at a time.',
+      'Only one column lines up with y in a perfectly straight line.',
+    ],
   },
 
   // ── INTERMEDIATE ──────────────────────────────────────────────────────────
@@ -141,8 +161,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => v + 0.5 * Math.sin(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['identity:x', 'sin:x'],
-    correctPowerMap: { x: 1 },
+    solution: 'x + 0.5sin(x)',
+    hints: [
+      'Look closely: the points wiggle around a straight line.',
+      'Work out y − x for some rows. What is left repeats about every 6.28 units.',
+    ],
   },
 
   {
@@ -156,8 +179,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => v + Math.sin(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['identity:x', 'sin:x'],
-    correctPowerMap: { x: 1 },
+    solution: 'x + sin(x)',
+    hints: [
+      'There is a straight-line trend plus something that keeps repeating.',
+      'y − x swings between −1 and 1, repeating about every 6.28 units.',
+    ],
   },
 
   {
@@ -171,8 +197,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 10 / v)
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['reciprocal:x'],
-    correctPowerMap: { x: -1 },
+    solution: '10/x',
+    hints: [
+      'Multiply x by y on a few rows. Notice anything?',
+      'x × y is the same on every row.',
+    ],
   },
 
   {
@@ -186,8 +215,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 3 * Math.abs(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['abs:x'],
-    correctPowerMap: {},
+    solution: '3abs(x)',
+    hints: [
+      'Compare y at some x with y at −x.',
+      'It is a V shape: two straight lines that meet at zero.',
+    ],
   },
 
   {
@@ -201,8 +233,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 2 * Math.cos(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['cos:x'],
-    correctPowerMap: {},
+    solution: '2cos(x)',
+    hints: [
+      'It repeats. Where is it highest: near x = 0, or somewhere else?',
+      'A wave at its peak when x = 0 that repeats about every 6.28 units.',
+    ],
   },
 
   {
@@ -216,8 +251,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 3 * Math.sin(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['sin:x'],
-    correctPowerMap: {},
+    solution: '3sin(x)',
+    hints: [
+      'It repeats. Measure the distance between two peaks.',
+      'A wave that crosses 0 at x = 0 and repeats about every 6.28 units.',
+    ],
   },
 
   {
@@ -231,8 +269,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 2 * Math.sin(2 * Math.PI * v / 7))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['sin_period7:x'],
-    correctPowerMap: {},
+    solution: '2sin(2pi x/7)',
+    hints: [
+      'Measure how far apart the peaks are. It is not 6.28.',
+      'The pattern repeats every 7 units. A wave that repeats every P units looks like sin(2πx/P).',
+    ],
   },
 
   {
@@ -247,8 +288,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x1.map((v, i) => v * x2[i])
       return { X: { x1: clean(x1), x2: clean(x2) }, y: clean(y) }
     },
-    solutionFeatures: [{ binary: 'multiply', a: 'x1', b: 'x2' }],
-    correctPowerMap: {},
+    solution: 'x1*x2',
+    hints: [
+      'Neither column explains y on its own. Try combining them.',
+      'Doubling x1 doubles y. Doubling x2 also doubles y.',
+    ],
   },
 
   {
@@ -263,8 +307,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x1.map((v, i) => v / x2[i])
       return { X: { x1: clean(x1), x2: clean(x2) }, y: clean(y) }
     },
-    solutionFeatures: [{ binary: 'divide', a: 'x1', b: 'x2' }],
-    correctPowerMap: {},
+    solution: 'x1/x2',
+    hints: [
+      'y grows with x1 but shrinks as x2 grows.',
+      'Doubling x1 doubles y. Doubling x2 halves y.',
+    ],
   },
 
   // ── CHALLENGE ─────────────────────────────────────────────────────────────
@@ -281,8 +328,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x1.map((v, i) => Math.sqrt(v ** 2 + x2[i] ** 2))
       return { X: { x1: clean(x1), x2: clean(x2) }, y: clean(y) }
     },
-    solutionFeatures: [{ binary: 'distance', a: 'x1', b: 'x2' }],
-    correctPowerMap: {},
+    solution: 'sqrt(x1^2 + x2^2)',
+    hints: [
+      'Picture (x1, x2) as a point on a grid. What could y be measuring?',
+      'y is a distance. When x2 is near 0, y is almost exactly x1.',
+    ],
   },
 
   {
@@ -296,8 +346,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 2 * v ** 3)
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['cube:x'],
-    correctPowerMap: { x: 3 },
+    solution: '2x^3',
+    hints: [
+      'Compare y at x and at −x, then see what doubling x does.',
+      'Doubling x multiplies y by 8, and y at −x is minus y at x.',
+    ],
   },
 
   {
@@ -313,8 +366,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x1.map((v, i) => v * x2[i] + 2 * x3[i])
       return { X: { x1: clean(x1), x2: clean(x2), x3: clean(x3) }, y: clean(y) }
     },
-    solutionFeatures: [{ binary: 'multiply', a: 'x1', b: 'x2' }, 'identity:x3'],
-    correctPowerMap: { x3: 1 },
+    solution: 'x1*x2 + 2x3',
+    hints: [
+      'Two pieces are added together. One of them uses two columns at once.',
+      'If x3 stayed fixed, y would change like x1 times x2. The x3 piece is a straight line.',
+    ],
   },
 
   {
@@ -328,8 +384,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 2 * Math.sin(v) + 3 * Math.sin(2 * Math.PI * v / 7))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['sin:x', 'sin_period7:x'],
-    correctPowerMap: {},
+    solution: '2sin(x) + 3sin(2pi x/7)',
+    hints: [
+      'Two waves are added together, each repeating at a different rate.',
+      'One wave repeats about every 6.28 units, the other every 7.',
+    ],
   },
 
   {
@@ -345,8 +404,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x1.map((v, i) => v ** 2 + Math.log(x2[i]) + Math.sqrt(x3[i]))
       return { X: { x1: clean(x1), x2: clean(x2), x3: clean(x3) }, y: clean(y) }
     },
-    solutionFeatures: ['square:x1', 'log:x2', 'sqrt:x3'],
-    correctPowerMap: { x1: 2, x3: 0.5 },
+    solution: 'x1^2 + ln(x2) + sqrt(x3)',
+    hints: [
+      'Each column adds its own separate piece, and the pieces are summed.',
+      'x1’s piece curves upward. x2’s piece flattens out very quickly. x3’s piece grows more and more slowly.',
+    ],
   },
 
   {
@@ -361,8 +423,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 4 * Math.sin(2 * Math.PI * v / 7))
       return { X: { x: clean(x), noise_col: clean(noise_col) }, y: clean(y) }
     },
-    solutionFeatures: ['sin_period7:x'],
-    correctPowerMap: {},
+    solution: '4sin(2pi x/7)',
+    hints: [
+      'One column is a decoy. Plot y against each column.',
+      'Against the useful column, the pattern repeats every 7 units.',
+    ],
   },
 
   {
@@ -376,8 +441,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => v ** 2 - 3 * v)
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['square:x', 'identity:x'],
-    correctPowerMap: { x: 2 },
+    solution: 'x^2 - 3x',
+    hints: [
+      'It is a U shape, but the bottom of the U is not at x = 0.',
+      'The bottom of the U is at x = 1.5, and y = 0 when x = 0.',
+    ],
   },
 
   {
@@ -391,8 +459,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => Math.sin(v) + Math.cos(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['sin:x', 'cos:x'],
-    correctPowerMap: {},
+    solution: 'sin(x) + cos(x)',
+    hints: [
+      'It is a wave, but at x = 0 it is neither at zero nor at its peak.',
+      'Try adding two simple waves together.',
+    ],
   },
 
   {
@@ -406,8 +477,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 2 * Math.exp(v))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['exp:x'],
-    correctPowerMap: {},
+    solution: '2exp(x)',
+    hints: [
+      'Each step of 1 in x multiplies y by the same amount.',
+      'y at x + 1 divided by y at x is about 2.718.',
+    ],
   },
 
   {
@@ -421,8 +495,11 @@ const PUZZLE_DEFS: PuzzleDef[] = [
       const y = x.map(v => 3 * (v >= 0 ? 1 : 0))
       return { X: { x: clean(x) }, y: clean(y) }
     },
-    solutionFeatures: ['step:x'],
-    correctPowerMap: {},
+    solution: '3step(x)',
+    hints: [
+      'Look at what happens on either side of x = 0.',
+      'y only ever takes two values, switching at x = 0. One of the functions in the list does exactly that.',
+    ],
   },
 ]
 
@@ -442,8 +519,8 @@ export const PUZZLES: PuzzleData[] = PUZZLE_DEFS.map((def, idx) => {
     columns: def.columns,
     X,
     y,
-    solutionFeatures: def.solutionFeatures,
-    correctPowerMap: def.correctPowerMap,
+    solution: def.solution,
+    hints: def.hints,
   }
 })
 
@@ -470,5 +547,6 @@ export function getPuzzleForPlayers(p: PuzzleData) {
     columns: p.columns,
     X: p.X,
     y: p.y,
+    hintCount: p.hints.length,
   }
 }

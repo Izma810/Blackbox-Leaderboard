@@ -1,172 +1,137 @@
-import { useReducer, useEffect, useCallback } from 'react'
+import { useReducer, useEffect, useCallback, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import type {
-  ServerMessage, RoomState, PlayerInfo, PublicSubmission,
-  VoteCount, RoundResult, WalletDelta, LeaderboardEntry,
-  Phase, PuzzleForPlayers,
+  ServerMessage, RoomState, PlayerInfo, PublicSubmission, RoundSummary,
+  LeaderboardEntry, Phase, PuzzleForPlayers, VoteType,
 } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
-import Timer from '../components/Timer'
-import PlayerList from '../components/PlayerList'
-import PuzzleDisplay from '../components/PuzzleDisplay'
-import SubmissionForm from '../components/SubmissionForm'
-import VotingPanel from '../components/VotingPanel'
+import Timer, { TimeBar } from '../components/Timer'
+import PuzzlePanel from '../components/PuzzlePanel'
+import FormulaInput from '../components/FormulaInput'
+import HintPanel from '../components/HintPanel'
+import EntryFeed from '../components/EntryFeed'
 import ResultsPanel from '../components/ResultsPanel'
+import { RulesContent, RulesDialog } from '../components/Rules'
+import { Formula } from '../lib/formula'
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 interface GameState {
   roomState:        RoomState | null
-  puzzle:           PuzzleForPlayers | null   // puzzle for the active round
+  puzzle:           PuzzleForPlayers | null
   phase:            Phase
   phaseEndsAt:      number | null
-  roundResults:     RoundResult[] | null
-  walletDeltas:     WalletDelta[] | null
+  summary:          RoundSummary | null
   finalLeaderboard: LeaderboardEntry[] | null
-  hasSubmitted:     boolean
   connected:        boolean
 }
 
 const initial: GameState = {
-  roomState: null, puzzle: null, phase: 'lobby',
-  phaseEndsAt: null, roundResults: null, walletDeltas: null,
-  finalLeaderboard: null, hasSubmitted: false, connected: false,
+  roomState: null, puzzle: null, phase: 'lobby', phaseEndsAt: null,
+  summary: null, finalLeaderboard: null, connected: false,
 }
 
 type Action =
   | { type: 'SET_STATE';        state: RoomState }
-  | { type: 'PLAYER_JOINED';    player: PlayerInfo }
+  | { type: 'UPSERT_PLAYER';    player: PlayerInfo }
   | { type: 'PLAYER_LEFT';      playerId: string }
   | { type: 'PHASE_CHANGED';    phase: Phase; endsAt: number | null; puzzle?: PuzzleForPlayers }
   | { type: 'SUBMISSION_MADE';  submission: PublicSubmission }
   | { type: 'VOTE_UPDATE';      submissionId: string; ups: number; downs: number }
-  | { type: 'ROUND_RESULTS';    results: RoundResult[]; deltas: WalletDelta[]; players: PlayerInfo[] }
+  | { type: 'MY_VOTE';          submissionId: string; vote: VoteType }
+  | { type: 'MY_HINTS';         hints: string[] }
+  | { type: 'ROUND_RESULTS';    summary: RoundSummary; players: PlayerInfo[] }
   | { type: 'GAME_ENDED';       leaderboard: LeaderboardEntry[] }
-  | { type: 'SUBMITTED' }
   | { type: 'CONNECTED';        v: boolean }
 
 function getMyPlayerId(roomId: string): string {
   return localStorage.getItem(`playerId:${roomId}`) ?? ''
 }
 
+function withRoom(state: GameState, fn: (rs: RoomState) => RoomState): GameState {
+  return state.roomState ? { ...state, roomState: fn(state.roomState) } : state
+}
+
 function reducer(state: GameState, action: Action): GameState {
   switch (action.type) {
-
     case 'SET_STATE': {
       const rs = action.state
       return {
         ...state,
-        roomState:        rs,
-        puzzle:           rs.puzzle ?? state.puzzle,
-        phase:            rs.currentRound?.phase ?? 'lobby',
-        phaseEndsAt:      rs.currentRound?.phaseEndsAt ?? null,
-        roundResults:     null,
-        walletDeltas:     null,
-        finalLeaderboard: null,
-        hasSubmitted:     rs.submissions.some(
-          (s) => s.playerId === getMyPlayerId(rs.room.id),
-        ),
+        roomState:   rs,
+        puzzle:      rs.puzzle,
+        phase:       rs.room.status === 'finished' ? 'finished' : rs.currentRound?.phase ?? 'lobby',
+        phaseEndsAt: rs.currentRound?.phaseEndsAt ?? null,
+        summary:     rs.summary,
       }
     }
 
-    case 'PLAYER_JOINED': {
-      if (!state.roomState) return state
-      const exists = state.roomState.players.some((p) => p.id === action.player.id)
-      return {
+    case 'UPSERT_PLAYER':
+      return withRoom(state, (rs) => ({
+        ...rs,
+        players: rs.players.some((p) => p.id === action.player.id)
+          ? rs.players.map((p) => (p.id === action.player.id ? action.player : p))
+          : [...rs.players, action.player],
+      }))
+
+    case 'PLAYER_LEFT':
+      return withRoom(state, (rs) => ({
+        ...rs,
+        players: rs.players.map((p) => (p.id === action.playerId ? { ...p, isConnected: false } : p)),
+      }))
+
+    case 'PHASE_CHANGED': {
+      const next: GameState = {
         ...state,
-        roomState: {
-          ...state.roomState,
-          players: exists
-            ? state.roomState.players.map((p) =>
-                p.id === action.player.id ? action.player : p,
-              )
-            : [...state.roomState.players, action.player],
-        },
+        phase:       action.phase,
+        phaseEndsAt: action.endsAt,
+        puzzle:      action.puzzle ?? (action.phase === 'lobby' ? null : state.puzzle),
+        summary:     action.phase === 'results' ? state.summary : null,
       }
+      // A new round starts with a clean board
+      if (action.phase === 'submission') {
+        return withRoom(next, (rs) => ({
+          ...rs, submissions: [], voteCounts: [], myVotes: {}, myHints: [], roundNumber: rs.roundNumber + 1,
+        }))
+      }
+      return next
     }
 
-    case 'PLAYER_LEFT': {
-      if (!state.roomState) return state
-      return {
-        ...state,
-        roomState: {
-          ...state.roomState,
-          players: state.roomState.players.map((p) =>
-            p.id === action.playerId ? { ...p, isConnected: false } : p,
-          ),
-        },
-      }
-    }
+    case 'SUBMISSION_MADE':
+      return withRoom(state, (rs) => ({
+        ...rs,
+        submissions: rs.submissions.some((s) => s.id === action.submission.id)
+          ? rs.submissions
+          : [...rs.submissions, action.submission],
+      }))
 
-    case 'PHASE_CHANGED':
-      return {
-        ...state,
-        phase:        action.phase,
-        phaseEndsAt:  action.endsAt,
-        // Carry the puzzle from the broadcast; keep old one if not included (e.g. results → lobby)
-        puzzle:       action.puzzle ?? (action.phase === 'lobby' ? null : state.puzzle),
-        // Clear submission flag when a new submission phase starts
-        hasSubmitted: action.phase === 'submission' ? false : state.hasSubmitted,
-        // Clear results when moving away from results
-        roundResults:  action.phase !== 'results' ? null : state.roundResults,
-        walletDeltas:  action.phase !== 'results' ? null : state.walletDeltas,
-      }
+    case 'VOTE_UPDATE':
+      return withRoom(state, (rs) => {
+        const entry = { submissionId: action.submissionId, ups: action.ups, downs: action.downs }
+        return {
+          ...rs,
+          voteCounts: rs.voteCounts.some((v) => v.submissionId === action.submissionId)
+            ? rs.voteCounts.map((v) => (v.submissionId === action.submissionId ? entry : v))
+            : [...rs.voteCounts, entry],
+        }
+      })
 
-    case 'SUBMISSION_MADE': {
-      if (!state.roomState) return state
-      const exists = state.roomState.submissions.some((s) => s.id === action.submission.id)
-      return {
-        ...state,
-        roomState: {
-          ...state.roomState,
-          submissions: exists
-            ? state.roomState.submissions
-            : [...state.roomState.submissions, action.submission],
-        },
-      }
-    }
+    case 'MY_VOTE':
+      return withRoom(state, (rs) => ({
+        ...rs, myVotes: { ...rs.myVotes, [action.submissionId]: action.vote },
+      }))
 
-    case 'VOTE_UPDATE': {
-      if (!state.roomState) return state
-      const existing = state.roomState.voteCounts.find(
-        (v) => v.submissionId === action.submissionId,
-      )
-      return {
-        ...state,
-        roomState: {
-          ...state.roomState,
-          voteCounts: existing
-            ? state.roomState.voteCounts.map((v) =>
-                v.submissionId === action.submissionId
-                  ? { ...v, ups: action.ups, downs: action.downs }
-                  : v,
-              )
-            : [
-                ...state.roomState.voteCounts,
-                { submissionId: action.submissionId, ups: action.ups, downs: action.downs },
-              ],
-        },
-      }
-    }
+    case 'MY_HINTS':
+      return withRoom(state, (rs) => ({ ...rs, myHints: action.hints }))
 
     case 'ROUND_RESULTS':
-      return {
-        ...state,
-        phase:        'results',
-        roundResults: action.results,
-        walletDeltas: action.deltas,
-        // Apply the updated player list (wallets already settled in DB) so the
-        // top bar and sidebar reflect the new balances without a page refresh
-        roomState: state.roomState
-          ? { ...state.roomState, players: action.players }
-          : state.roomState,
-      }
+      return withRoom(
+        { ...state, phase: 'results', phaseEndsAt: null, summary: action.summary },
+        (rs) => ({ ...rs, players: action.players }),
+      )
 
     case 'GAME_ENDED':
       return { ...state, phase: 'finished', finalLeaderboard: action.leaderboard }
-
-    case 'SUBMITTED':
-      return { ...state, hasSubmitted: true }
 
     case 'CONNECTED':
       return { ...state, connected: action.v }
@@ -179,11 +144,13 @@ function reducer(state: GameState, action: Action): GameState {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Room() {
-  const { roomId } = useParams<{ roomId: string }>()
-  const navigate   = useNavigate()
+  const { roomId = '' } = useParams<{ roomId: string }>()
+  const navigate = useNavigate()
   const [state, dispatch] = useReducer(reducer, initial)
+  const [showRules, setShowRules] = useState(false)
+  const [highlightId, setHighlightId] = useState<string | null>(null)
 
-  const playerId = getMyPlayerId(roomId ?? '')
+  const playerId = getMyPlayerId(roomId)
 
   useEffect(() => {
     if (!playerId) navigate('/')
@@ -191,27 +158,14 @@ export default function Room() {
 
   const onMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
-      case 'FULL_STATE':
-        dispatch({ type: 'SET_STATE', state: msg.state })
-        break
+      case 'FULL_STATE':      dispatch({ type: 'SET_STATE', state: msg.state }); break
       case 'PLAYER_JOINED':
-        dispatch({ type: 'PLAYER_JOINED', player: msg.player })
-        break
-      case 'PLAYER_LEFT':
-        dispatch({ type: 'PLAYER_LEFT', playerId: msg.playerId })
-        break
-      case 'PHASE_CHANGED':
-        dispatch({ type: 'PHASE_CHANGED', phase: msg.phase, endsAt: msg.endsAt, puzzle: msg.puzzle })
-        break
-      case 'SUBMISSION_MADE':
-        dispatch({ type: 'SUBMISSION_MADE', submission: msg.submission })
-        break
-      case 'VOTE_UPDATE':
-        dispatch({ type: 'VOTE_UPDATE', submissionId: msg.submissionId, ups: msg.ups, downs: msg.downs })
-        break
-      case 'ROUND_RESULTS':
-        dispatch({ type: 'ROUND_RESULTS', results: msg.results, deltas: msg.deltas, players: msg.players })
-        break
+      case 'PLAYER_UPDATED':  dispatch({ type: 'UPSERT_PLAYER', player: msg.player }); break
+      case 'PLAYER_LEFT':     dispatch({ type: 'PLAYER_LEFT', playerId: msg.playerId }); break
+      case 'PHASE_CHANGED':   dispatch({ type: 'PHASE_CHANGED', phase: msg.phase, endsAt: msg.endsAt, puzzle: msg.puzzle }); break
+      case 'SUBMISSION_MADE': dispatch({ type: 'SUBMISSION_MADE', submission: msg.submission }); break
+      case 'VOTE_UPDATE':     dispatch({ type: 'VOTE_UPDATE', submissionId: msg.submissionId, ups: msg.ups, downs: msg.downs }); break
+      case 'ROUND_RESULTS':   dispatch({ type: 'ROUND_RESULTS', summary: msg.summary, players: msg.players }); break
       case 'GAME_ENDED':
         dispatch({ type: 'GAME_ENDED', leaderboard: msg.leaderboard })
         setTimeout(() => navigate(`/room/${roomId}/final`), 4000)
@@ -222,290 +176,213 @@ export default function Room() {
   const onOpen  = useCallback(() => dispatch({ type: 'CONNECTED', v: true }),  [])
   const onClose = useCallback(() => dispatch({ type: 'CONNECTED', v: false }), [])
 
-  useWebSocket({ roomId: roomId ?? '', playerId, onMessage, onOpen, onClose })
+  useWebSocket({ roomId, playerId, onMessage, onOpen, onClose })
 
-  // ── Loading / connecting ──────────────────────────────────────────────────
+  const flash = useCallback((id: string) => {
+    setHighlightId(id)
+    setTimeout(() => setHighlightId((cur) => (cur === id ? null : cur)), 1300)
+  }, [])
+
   if (!state.roomState) {
     return (
-      <div className="min-h-screen flex items-center justify-center text-zinc-500 text-sm">
+      <div className="flex min-h-screen items-center justify-center text-ink-3">
         <div className="flex items-center gap-3">
-          <span className={`w-2.5 h-2.5 rounded-full animate-pulse ${state.connected ? 'bg-brand-400' : 'bg-zinc-600'}`} />
+          <span className={`h-2.5 w-2.5 animate-pulse rounded-full ${state.connected ? 'bg-up' : 'bg-ink-4'}`} />
           {state.connected ? 'Loading room…' : 'Connecting…'}
         </div>
       </div>
     )
   }
 
-  const { roomState, puzzle } = state
+  const { roomState, puzzle, phase } = state
+  const config = roomState.room.config
   const me = roomState.players.find((p) => p.id === playerId)
-
-  const phaseLabel: Record<Phase, string> = {
-    lobby: 'LOBBY', submission: 'SUBMISSION', voting: 'VOTING',
-    results: 'RESULTS', finished: 'FINISHED',
-  }
-  const phaseBadge: Record<Phase, string> = {
-    lobby: 'badge-zinc', submission: 'badge-yellow',
-    voting: 'badge-blue', results: 'badge-green', finished: 'badge-zinc',
-  }
+  const ranked = [...roomState.players].sort((a, b) => b.wallet - a.wallet)
+  const myRank = ranked.findIndex((p) => p.id === playerId) + 1
+  const mySubmission = roomState.submissions.find((s) => s.playerId === playerId)
+  const online = roomState.players.filter((p) => p.isConnected).length
 
   return (
-    <div className="min-h-screen flex flex-col">
-
+    <div className="flex min-h-screen flex-col">
       {/* ── Top bar ─────────────────────────────────────────────────────────── */}
-      <header className="border-b border-zinc-800 px-4 py-3 flex items-center justify-between gap-4 shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="text-zinc-600 text-xs font-mono hidden sm:block">#{roomId}</span>
-          <span className="text-zinc-300 font-semibold truncate">{roomState.room.name}</span>
-          <span className={`badge text-xs shrink-0 ${phaseBadge[state.phase]}`}>
-            {phaseLabel[state.phase]}
-          </span>
-          {roomState.currentRound && (
-            <span className="text-zinc-600 text-xs shrink-0">Round {roomState.roundNumber}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-4 shrink-0">
-          {me && (
-            <div className="text-right">
-              <div className="text-xs text-zinc-500">wallet</div>
-              <div className="text-brand-400 font-bold tabular-nums text-sm">
-                {me.wallet.toLocaleString()}
+      <header className="sticky top-0 z-30 border-b border-line bg-paper/90 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-3 sm:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="font-display text-lg font-bold tracking-tight">blackbox</span>
+            <span className="h-5 w-px bg-line" aria-hidden />
+            <span className="truncate font-semibold text-ink-2">{roomState.room.name}</span>
+            {roomState.currentRound && phase !== 'finished' && (
+              <span className="chip-neutral shrink-0">Round {roomState.roundNumber}</span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3 sm:gap-5">
+            {phase === 'submission' && <Timer endsAt={state.phaseEndsAt} />}
+
+            {me && (
+              <div className="flex items-center gap-3 rounded-xl border-2 border-ink bg-white px-3 py-1.5 shadow-pop">
+                <div className="leading-tight">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-3">Wallet</div>
+                  <div className="tabular font-display text-lg font-semibold">{me.wallet.toLocaleString()}</div>
+                </div>
+                {myRank > 0 && (
+                  <div className="border-l border-line pl-3 leading-tight">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-3">Rank</div>
+                    <div className="tabular font-display text-lg font-semibold">
+                      #{myRank}<span className="text-sm text-ink-4">/{ranked.length}</span>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
-          <div className="flex items-center gap-1.5">
-            <div className={`w-2 h-2 rounded-full ${state.connected ? 'bg-brand-400' : 'bg-red-500 animate-pulse'}`} />
-            <span className="text-xs text-zinc-600">{state.connected ? 'live' : 'reconnecting…'}</span>
+            )}
+
+            <button className="btn-ghost px-3 py-2 text-sm" onClick={() => setShowRules(true)}>
+              Rules
+            </button>
+
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${state.connected ? 'bg-up' : 'animate-pulse bg-down'}`}
+              title={state.connected ? 'Live' : 'Reconnecting…'}
+              aria-label={state.connected ? 'Connected' : 'Reconnecting'}
+            />
           </div>
         </div>
+        {phase === 'submission' && <TimeBar endsAt={state.phaseEndsAt} totalSecs={config.phase1Secs} />}
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
+      {!state.connected && (
+        <div className="bg-down px-4 py-2 text-center text-sm font-medium text-white">
+          Connection lost. Reconnecting…
+        </div>
+      )}
 
-        {/* ── Main content ─────────────────────────────────────────────────── */}
-        <main className="flex-1 overflow-y-auto p-4 md:p-6">
+      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6">
+        {phase === 'lobby' && (
+          <LobbyView roomState={roomState} online={online} />
+        )}
 
-          {state.phase === 'lobby' && (
-            <LobbyView roomState={roomState} />
-          )}
+        {phase === 'submission' && (
+          <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_400px] xl:grid-cols-[minmax(0,1fr)_440px]">
+            <div className="flex flex-col gap-6">
+              {puzzle ? <PuzzlePanel puzzle={puzzle} /> : <div className="card text-ink-3">Loading puzzle…</div>}
 
-          {(state.phase === 'submission' || state.phase === 'voting') && (
-            <ActiveRoundView
-              roomState={roomState}
-              puzzle={puzzle}
-              phase={state.phase}
-              phaseEndsAt={state.phaseEndsAt}
-              playerId={playerId}
-              hasSubmitted={state.hasSubmitted}
-              onSubmitted={() => dispatch({ type: 'SUBMITTED' })}
-            />
-          )}
+              {puzzle && !mySubmission && (
+                <FormulaInput
+                  key={roomState.currentRound?.id}
+                  columns={puzzle.columns}
+                  roomId={roomId}
+                  playerId={playerId}
+                  stake={config.postStake}
+                  wallet={me?.wallet ?? 0}
+                  onSubmitted={() => {}}
+                  onDuplicate={flash}
+                />
+              )}
 
-          {state.phase === 'results' && state.roundResults && (
-            <div className="max-w-2xl mx-auto flex flex-col gap-4">
-              <h2 className="text-xl font-bold text-zinc-100">Round Results</h2>
-              <ResultsPanel
-                results={state.roundResults}
-                deltas={state.walletDeltas ?? []}
+              {mySubmission && (
+                <section className="card-pop flex flex-col gap-3 animate-pop-in">
+                  <span className="chip-up w-fit">✓ Your claim is live</span>
+                  <div className="font-display text-2xl font-medium break-words">
+                    <Formula expr={mySubmission.expr} />
+                  </div>
+                  <p className="text-ink-2">
+                    {config.postStake} coins staked. Now use your votes on the board. Back the formulas you trust, doubt the ones you don't.
+                  </p>
+                </section>
+              )}
+
+              {puzzle && (
+                <HintPanel
+                  roomId={roomId}
+                  playerId={playerId}
+                  hints={roomState.myHints}
+                  hintCount={puzzle.hintCount}
+                  cost={config.hintCost}
+                  wallet={me?.wallet ?? 0}
+                  onBought={(hints) => dispatch({ type: 'MY_HINTS', hints })}
+                />
+              )}
+            </div>
+
+            <div className="lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto lg:pr-1">
+              <EntryFeed
+                submissions={roomState.submissions}
+                voteCounts={roomState.voteCounts}
+                myVotes={roomState.myVotes}
                 myPlayerId={playerId}
+                roomId={roomId}
+                votesPerRound={config.votesPerRound}
+                stake={config.voteStake}
+                wallet={me?.wallet ?? 0}
+                highlightId={highlightId}
+                onVoted={(submissionId, vote) => dispatch({ type: 'MY_VOTE', submissionId, vote })}
               />
-              <p className="text-zinc-500 text-sm text-center mt-2">
-                Waiting for admin to start the next round…
-              </p>
             </div>
-          )}
-
-          {state.phase === 'finished' && (
-            <div className="flex flex-col items-center justify-center py-16 gap-4">
-              <div className="text-3xl font-bold text-brand-400">Game Over!</div>
-              <p className="text-zinc-400 text-sm">Redirecting to final leaderboard…</p>
-            </div>
-          )}
-        </main>
-
-        {/* ── Sidebar: players ─────────────────────────────────────────────── */}
-        <aside className="w-60 border-l border-zinc-800 p-4 hidden lg:flex flex-col gap-4 overflow-y-auto shrink-0">
-          <div className="text-xs text-zinc-500 uppercase tracking-wider">
-            Players ({roomState.players.length})
           </div>
-          <PlayerList players={roomState.players} myPlayerId={playerId} showWallet />
-        </aside>
-      </div>
+        )}
+
+        {phase === 'results' && state.summary && (
+          <div className="mx-auto flex max-w-3xl flex-col gap-6">
+            <ResultsPanel summary={state.summary} myPlayerId={playerId} />
+            <p className="text-center text-ink-3">Waiting for the host to start the next round…</p>
+          </div>
+        )}
+
+        {phase === 'finished' && (
+          <div className="flex flex-col items-center justify-center gap-4 py-24 text-center animate-pop-in">
+            <h1 className="text-5xl font-bold">Game over</h1>
+            <p className="text-ink-3">Taking you to the final leaderboard…</p>
+            <button className="btn-secondary mt-2" onClick={() => navigate(`/room/${roomId}/final`)}>
+              See leaderboard now
+            </button>
+          </div>
+        )}
+      </main>
+
+      {showRules && <RulesDialog config={config} onClose={() => setShowRules(false)} />}
     </div>
   )
 }
 
 // ─── Lobby ────────────────────────────────────────────────────────────────────
 
-function LobbyView({ roomState }: { roomState: RoomState }) {
+function LobbyView({ roomState, online }: { roomState: RoomState; online: number }) {
+  const [copied, setCopied] = useState(false)
+
   return (
-    <div className="max-w-lg mx-auto py-16 text-center flex flex-col items-center gap-6">
-      <div>
-        <div className="text-4xl mb-3 text-zinc-600">x → ??? → y</div>
-        <h2 className="text-xl font-semibold text-zinc-300">Waiting for admin to start</h2>
-        <p className="text-zinc-500 text-sm mt-2">
-          {roomState.players.length} player{roomState.players.length !== 1 ? 's' : ''} connected
+    <div className="mx-auto flex max-w-4xl flex-col gap-8">
+      <section className="flex flex-col items-center gap-5 py-6 text-center">
+        <div className="flex items-center gap-3 font-display text-xl font-semibold text-ink-3 sm:text-2xl">
+          <span>x</span>
+          <span aria-hidden>→</span>
+          <span className="rounded-xl bg-ink px-4 py-1.5 text-white">? ? ?</span>
+          <span aria-hidden>→</span>
+          <span>y</span>
+        </div>
+        <h1 className="text-4xl font-bold sm:text-5xl">Waiting for the host</h1>
+        <p className="text-lg text-ink-2">
+          <span className="font-semibold text-ink">{online}</span> player{online === 1 ? '' : 's'} here.
+          Read the rules while you wait. The round starts as soon as the host is ready.
         </p>
-      </div>
-      <div className="card w-full max-w-xs">
-        <div className="text-xs text-zinc-500 mb-2 uppercase tracking-wider">Room ID</div>
-        <code className="text-brand-400 font-bold text-xl block text-center py-1.5 bg-zinc-800 rounded-lg select-all">
-          {roomState.room.id}
-        </code>
-        <p className="text-zinc-600 text-xs mt-2 text-center">Share this with other players</p>
-      </div>
-    </div>
-  )
-}
+        <button
+          className="card-pop flex items-center gap-4 px-5 py-3 transition-transform hover:-translate-y-0.5"
+          onClick={() => {
+            navigator.clipboard?.writeText(roomState.room.id).then(() => {
+              setCopied(true)
+              setTimeout(() => setCopied(false), 1500)
+            }).catch(() => {})
+          }}
+        >
+          <span className="eyebrow">Room code</span>
+          <span className="tabular font-display text-2xl font-semibold tracking-wider">{roomState.room.id}</span>
+          <span className="chip-neutral">{copied ? 'Copied!' : 'Copy'}</span>
+        </button>
+      </section>
 
-// ─── Active round (submission + voting) ───────────────────────────────────────
-
-interface ActiveRoundViewProps {
-  roomState:    RoomState
-  puzzle:       PuzzleForPlayers | null
-  phase:        'submission' | 'voting'
-  phaseEndsAt:  number | null
-  playerId:     string
-  hasSubmitted: boolean
-  onSubmitted:  () => void
-}
-
-function ActiveRoundView({
-  roomState, puzzle, phase, phaseEndsAt, playerId, hasSubmitted, onSubmitted,
-}: ActiveRoundViewProps) {
-  const submittedCount = roomState.submissions.length
-  const totalPlayers   = roomState.players.length
-
-  return (
-    <div className="max-w-2xl mx-auto flex flex-col gap-6">
-
-      {/* Phase header */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div>
-          <div className={`text-xs uppercase tracking-widest font-semibold mb-1 ${
-            phase === 'submission' ? 'text-yellow-400' : 'text-blue-400'
-          }`}>
-            {phase === 'submission' ? '— Phase 1: Submission —' : '— Phase 2: Voting —'}
-          </div>
-          <h2 className="text-lg font-bold text-zinc-100">
-            {phase === 'submission'
-              ? 'What is the hidden function?'
-              : 'Vote on submissions'}
-          </h2>
-        </div>
-        <Timer endsAt={phaseEndsAt} />
-      </div>
-
-      {/* Submission count */}
-      <div className="text-sm text-zinc-400">
-        <span className="text-zinc-200 font-medium">{submittedCount}</span>
-        {' / '}
-        <span>{totalPlayers}</span>
-        {' players submitted'}
-      </div>
-
-      {/* Puzzle display */}
-      {puzzle ? (
-        <div className="card">
-          <PuzzleDisplay puzzle={puzzle} previewRows={20} />
-        </div>
-      ) : (
-        <div className="card text-zinc-600 text-sm italic text-center py-8">
-          Loading puzzle…
-        </div>
-      )}
-
-      {/* Submission form (phase 1, not yet submitted) */}
-      {phase === 'submission' && !hasSubmitted && puzzle && (
-        <div className="card">
-          <div className="text-xs text-zinc-500 uppercase tracking-wider mb-4">Your answer</div>
-          <SubmissionForm
-            columns={puzzle.columns}
-            roomId={roomState.room.id}
-            playerId={playerId}
-            onSubmitted={onSubmitted}
-          />
-        </div>
-      )}
-
-      {phase === 'submission' && hasSubmitted && (
-        <div className="card bg-brand-500/10 border-brand-500/30 text-center py-5">
-          <div className="text-brand-400 font-semibold text-lg">✓ Submitted!</div>
-          <div className="text-zinc-500 text-sm mt-1">
-            Waiting for others… Voting starts when the timer ends.
-          </div>
-        </div>
-      )}
-
-      {/* Live submission feed — both phases */}
-      {roomState.submissions.length > 0 && (
-        <div className="flex flex-col gap-3">
-          <div className="text-xs text-zinc-500 uppercase tracking-wider">
-            {phase === 'submission' ? 'Submissions so far (live)' : 'All submissions — vote below'}
-          </div>
-
-          {phase === 'submission' ? (
-            <SubmissionFeed submissions={roomState.submissions} myPlayerId={playerId} />
-          ) : (
-            <VotingPanel
-              submissions={roomState.submissions}
-              voteCounts={roomState.voteCounts}
-              myPlayerId={playerId}
-              roomId={roomState.room.id}
-              playerId={playerId}
-              votesPerRound={roomState.room.config.votesPerRound}
-              voterReward={roomState.room.config.voterReward}
-              onVoteCast={() => {}}
-            />
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ─── Submission feed (phase 1 live list) ─────────────────────────────────────
-
-function SubmissionFeed({
-  submissions,
-  myPlayerId,
-}: {
-  submissions: PublicSubmission[]
-  myPlayerId: string
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      {submissions.map((sub, idx) => {
-        const isOwn = sub.playerId === myPlayerId
-        return (
-          <div
-            key={sub.id}
-            className={`
-              flex items-center gap-3 px-3 py-2 rounded-lg text-sm animate-slide-up
-              ${isOwn
-                ? 'bg-brand-500/10 border border-brand-500/30'
-                : 'bg-zinc-800/60'}
-            `}
-          >
-            <span className="text-zinc-600 text-xs w-5 text-center tabular-nums">{idx + 1}</span>
-            <span className={`font-medium shrink-0 ${isOwn ? 'text-brand-400' : 'text-zinc-300'}`}>
-              {sub.label}
-            </span>
-            <div className="flex flex-wrap gap-1 flex-1 min-w-0">
-              {sub.features.map((f, i) => (
-                <code
-                  key={i}
-                  className="text-xs bg-zinc-900 border border-zinc-700 rounded px-1.5 py-0.5 text-zinc-400"
-                >
-                  {typeof f === 'string' ? f : `${f.binary}(${f.a}, ${f.b})`}
-                </code>
-              ))}
-            </div>
-            <span className="text-zinc-700 text-xs shrink-0">
-              {new Date(sub.submittedAt).toLocaleTimeString()}
-            </span>
-          </div>
-        )
-      })}
+      <section className="card">
+        <h2 className="mb-5 text-2xl font-semibold">How to play</h2>
+        <RulesContent config={roomState.room.config} />
+      </section>
     </div>
   )
 }

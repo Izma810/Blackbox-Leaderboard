@@ -4,7 +4,7 @@
  * works with clean TypeScript types (camelCase).
  */
 
-import type { Room, PlayerInfo, Round, RoomConfig, PublicSubmission, VoteCount, Feature } from '../types'
+import type { Room, PlayerInfo, Round, RoomConfig, PublicSubmission, VoteCount, VoteType } from '../types'
 
 // ─── Row → type converters ────────────────────────────────────────────────────
 
@@ -15,9 +15,12 @@ function rowToConfig(r: Row): RoomConfig {
   return {
     startingWallet:  r.starting_wallet,
     phase1Secs:      r.phase1_secs,
-    phase2Secs:      r.phase2_secs,
-    posterReward:    r.poster_reward,
-    voterReward:     r.voter_reward,
+    // poster_reward / voter_reward are the stakes (column names predate payouts)
+    postStake:       r.poster_reward,
+    postPayout:      r.post_payout,
+    voteStake:       r.voter_reward,
+    backPayout:      r.back_payout,
+    hintCost:        r.hint_cost,
     votesPerRound:   r.votes_per_round,
     anonymousVoting: r.anonymous_voting === 1,
     maxRounds:       r.max_rounds ?? null,
@@ -126,6 +129,7 @@ export interface SubmissionRow {
   round_id: string
   player_id: string
   username: string
+  /** The formula as typed by the player */
   features_json: string
   r2_score: number | null
   base_score: number
@@ -160,7 +164,7 @@ export function buildPublicSubmissions(
     label:       anonymousVoting
       ? String.fromCharCode(65 + idx)   // A, B, C, …
       : r.username,
-    features:    JSON.parse(r.features_json) as Feature[],
+    expr:        r.features_json,
     submittedAt: r.submitted_at,
   }))
 }
@@ -203,4 +207,16 @@ export async function getVoteCountForSubmission(
     .bind(submissionId)
     .first<Row>()
   return { ups: r?.ups ?? 0, downs: r?.downs ?? 0 }
+}
+
+export async function getPlayerVotes(
+  db: D1Database,
+  roundId: string,
+  voterId: string,
+): Promise<Record<string, VoteType>> {
+  const res = await db
+    .prepare('SELECT submission_id, vote_type FROM votes WHERE round_id = ? AND voter_id = ?')
+    .bind(roundId, voterId)
+    .all<Row>()
+  return Object.fromEntries(res.results.map((r) => [r.submission_id, r.vote_type as VoteType]))
 }

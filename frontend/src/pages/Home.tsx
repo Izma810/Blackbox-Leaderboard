@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { apiUrl } from '../lib/backend'
 
 export default function Home() {
   const navigate = useNavigate()
@@ -16,7 +17,7 @@ export default function Home() {
 
     setJoining(true)
     try {
-      const res = await fetch(`/api/rooms/${roomId.trim()}/join`, {
+      const res = await fetch(apiUrl(`/api/rooms/${roomId.trim()}/join`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim() }),

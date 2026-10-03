@@ -86,6 +86,7 @@ export class GameRoomDO implements DurableObject {
       case 'admin/advance-phase':  return this.serialized(() => this.handleAdvancePhase(roomId))
       case 'admin/end-game':       return this.serialized(() => this.handleEndGame(roomId))
       case 'admin/config':         return this.serialized(() => this.handleUpdateConfig(roomId, body))
+      case 'admin/delete':         return this.serialized(() => this.handleDeleteRoom(roomId))
       case 'state':                return this.handleGetState(roomId)
       default:                     return new Response('Not found', { status: 404 })
     }
@@ -493,6 +494,40 @@ export class GameRoomDO implements DurableObject {
 
     const leaderboard = await this.buildLeaderboard(roomId)
     this.broadcast({ type: 'GAME_ENDED', leaderboard })
+  }
+
+  // ─── Admin: delete room ───────────────────────────────────────────────────
+
+  private async handleDeleteRoom(roomId: string): Promise<Response> {
+    const room = await getRoomById(this.env.DB, roomId)
+    if (!room) return jsonRes({ error: 'Room not found' }, 404)
+
+    const inRoom = (table: string, col: string, via: 'rounds' | 'players') =>
+      this.env.DB
+        .prepare(`DELETE FROM ${table} WHERE ${col} IN (SELECT id FROM ${via} WHERE room_id = ?)`)
+        .bind(roomId)
+
+    // Children first so foreign keys never point at deleted rows
+    await this.env.DB.batch([
+      inRoom('votes', 'round_id', 'rounds'),
+      inRoom('submissions', 'round_id', 'rounds'),
+      inRoom('round_players', 'round_id', 'rounds'),
+      inRoom('wallet_transactions', 'player_id', 'players'),
+      this.env.DB.prepare('DELETE FROM rounds WHERE room_id = ?').bind(roomId),
+      this.env.DB.prepare('DELETE FROM players WHERE room_id = ?').bind(roomId),
+      this.env.DB.prepare('DELETE FROM rooms WHERE id = ?').bind(roomId),
+    ])
+
+    // Kick everyone out and wipe this object's own storage (stored roomId, alarm)
+    this.broadcast({ type: 'ROOM_DELETED' })
+    for (const ws of this.connections.values()) {
+      try { ws.close(4004, 'Room deleted') } catch { /* already closed */ }
+    }
+    this.connections.clear()
+    await this.ctx.storage.deleteAlarm()
+    await this.ctx.storage.deleteAll()
+
+    return jsonRes({ ok: true })
   }
 
   // ─── Admin: update config ─────────────────────────────────────────────────

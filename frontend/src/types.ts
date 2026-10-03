@@ -127,5 +127,6 @@ export type ServerMessage =
   | { type: 'VOTE_UPDATE';      submissionId: string; ups: number; downs: number }
   | { type: 'ROUND_RESULTS';    summary: RoundSummary; players: PlayerInfo[] }
   | { type: 'GAME_ENDED';       leaderboard: LeaderboardEntry[] }
+  | { type: 'ROOM_DELETED' }
   | { type: 'ERROR';            message: string }
   | { type: 'PONG' }

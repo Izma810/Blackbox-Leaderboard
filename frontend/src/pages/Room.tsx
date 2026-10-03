@@ -12,7 +12,11 @@ import HintPanel from '../components/HintPanel'
 import EntryFeed from '../components/EntryFeed'
 import ResultsPanel from '../components/ResultsPanel'
 import { RulesContent, RulesDialog } from '../components/Rules'
+import Leaderboard, { LeaderboardDialog, rankPlayers } from '../components/Leaderboard'
+import RoundIntro from '../components/RoundIntro'
+import StandingsReveal from '../components/StandingsReveal'
 import { Formula } from '../lib/formula'
+import { apiUrl } from '../lib/backend'
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -24,11 +28,17 @@ interface GameState {
   summary:          RoundSummary | null
   finalLeaderboard: LeaderboardEntry[] | null
   connected:        boolean
+  deleted:          boolean
+  /** Round-start countdown to play (only for rounds that start while we watch) */
+  intro:            { round: number; title: string } | null
+  /** Play the animated standings for the round that just settled */
+  reveal:           boolean
 }
 
 const initial: GameState = {
   roomState: null, puzzle: null, phase: 'lobby', phaseEndsAt: null,
-  summary: null, finalLeaderboard: null, connected: false,
+  summary: null, finalLeaderboard: null, connected: false, deleted: false,
+  intro: null, reveal: false,
 }
 
 type Action =
@@ -43,6 +53,9 @@ type Action =
   | { type: 'ROUND_RESULTS';    summary: RoundSummary; players: PlayerInfo[] }
   | { type: 'GAME_ENDED';       leaderboard: LeaderboardEntry[] }
   | { type: 'CONNECTED';        v: boolean }
+  | { type: 'ROOM_DELETED' }
+  | { type: 'INTRO_DONE' }
+  | { type: 'REVEAL_DONE' }
 
 function getMyPlayerId(roomId: string): string {
   return localStorage.getItem(`playerId:${roomId}`) ?? ''
@@ -87,9 +100,12 @@ function reducer(state: GameState, action: Action): GameState {
         phaseEndsAt: action.endsAt,
         puzzle:      action.puzzle ?? (action.phase === 'lobby' ? null : state.puzzle),
         summary:     action.phase === 'results' ? state.summary : null,
+        reveal:      action.phase === 'results' ? state.reveal : false,
       }
       // A new round starts with a clean board
       if (action.phase === 'submission') {
+        const round = (state.roomState?.roundNumber ?? 0) + 1
+        next.intro = action.puzzle ? { round, title: action.puzzle.title } : null
         return withRoom(next, (rs) => ({
           ...rs, submissions: [], voteCounts: [], myVotes: {}, myHints: [], roundNumber: rs.roundNumber + 1,
         }))
@@ -126,7 +142,10 @@ function reducer(state: GameState, action: Action): GameState {
 
     case 'ROUND_RESULTS':
       return withRoom(
-        { ...state, phase: 'results', phaseEndsAt: null, summary: action.summary },
+        {
+          ...state, phase: 'results', phaseEndsAt: null, summary: action.summary,
+          intro: null, reveal: action.summary.deltas.length > 0,
+        },
         (rs) => ({ ...rs, players: action.players }),
       )
 
@@ -135,6 +154,15 @@ function reducer(state: GameState, action: Action): GameState {
 
     case 'CONNECTED':
       return { ...state, connected: action.v }
+
+    case 'ROOM_DELETED':
+      return { ...state, deleted: true }
+
+    case 'INTRO_DONE':
+      return { ...state, intro: null }
+
+    case 'REVEAL_DONE':
+      return { ...state, reveal: false }
 
     default:
       return state
@@ -148,9 +176,11 @@ export default function Room() {
   const navigate = useNavigate()
   const [state, dispatch] = useReducer(reducer, initial)
   const [showRules, setShowRules] = useState(false)
+  const [showBoard, setShowBoard] = useState(false)
   const [highlightId, setHighlightId] = useState<string | null>(null)
 
-  const playerId = getMyPlayerId(roomId)
+  // Read once: it's cleared from storage if the room is deleted, and the page must not jump home then
+  const [playerId] = useState(() => getMyPlayerId(roomId))
 
   useEffect(() => {
     if (!playerId) navigate('/')
@@ -166,6 +196,7 @@ export default function Room() {
       case 'SUBMISSION_MADE': dispatch({ type: 'SUBMISSION_MADE', submission: msg.submission }); break
       case 'VOTE_UPDATE':     dispatch({ type: 'VOTE_UPDATE', submissionId: msg.submissionId, ups: msg.ups, downs: msg.downs }); break
       case 'ROUND_RESULTS':   dispatch({ type: 'ROUND_RESULTS', summary: msg.summary, players: msg.players }); break
+      case 'ROOM_DELETED':    dispatch({ type: 'ROOM_DELETED' }); break
       case 'GAME_ENDED':
         dispatch({ type: 'GAME_ENDED', leaderboard: msg.leaderboard })
         setTimeout(() => navigate(`/room/${roomId}/final`), 4000)
@@ -178,10 +209,35 @@ export default function Room() {
 
   useWebSocket({ roomId, playerId, onMessage, onOpen, onClose })
 
+  // A deleted room refuses the WebSocket, so check it exists rather than retrying forever
+  useEffect(() => {
+    fetch(apiUrl(`/api/rooms/${roomId}`))
+      .then((r) => { if (r.status === 404) dispatch({ type: 'ROOM_DELETED' }) })
+      .catch(() => {})
+  }, [roomId])
+
+  useEffect(() => {
+    if (!state.deleted) return
+    localStorage.removeItem(`playerId:${roomId}`)
+    localStorage.removeItem(`username:${roomId}`)
+  }, [state.deleted, roomId])
+
+  const closeReveal = useCallback(() => dispatch({ type: 'REVEAL_DONE' }), [])
+
   const flash = useCallback((id: string) => {
     setHighlightId(id)
     setTimeout(() => setHighlightId((cur) => (cur === id ? null : cur)), 1300)
   }, [])
+
+  if (state.deleted) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
+        <h1 className="text-4xl font-bold">This room was deleted</h1>
+        <p className="max-w-sm text-ink-3">The host closed it for good. Ask them for a new room code to keep playing.</p>
+        <button className="btn-primary mt-2" onClick={() => navigate('/')}>Back to home</button>
+      </div>
+    )
+  }
 
   if (!state.roomState) {
     return (
@@ -197,7 +253,7 @@ export default function Room() {
   const { roomState, puzzle, phase } = state
   const config = roomState.room.config
   const me = roomState.players.find((p) => p.id === playerId)
-  const ranked = [...roomState.players].sort((a, b) => b.wallet - a.wallet)
+  const ranked = rankPlayers(roomState.players)
   const myRank = ranked.findIndex((p) => p.id === playerId) + 1
   const mySubmission = roomState.submissions.find((s) => s.playerId === playerId)
   const online = roomState.players.filter((p) => p.isConnected).length
@@ -220,7 +276,11 @@ export default function Room() {
             {phase === 'submission' && <Timer endsAt={state.phaseEndsAt} />}
 
             {me && (
-              <div className="flex items-center gap-3 rounded-xl border-2 border-ink bg-white px-3 py-1.5 shadow-pop">
+              <button
+                onClick={() => setShowBoard(true)}
+                title="Open the leaderboard"
+                className="flex items-center gap-3 rounded-xl border-2 border-ink bg-white px-3 py-1.5 text-left shadow-pop transition-all hover:-translate-x-px hover:-translate-y-px hover:shadow-pop-lg active:translate-x-[3px] active:translate-y-[3px] active:shadow-none"
+              >
                 <div className="leading-tight">
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-3">Wallet</div>
                   <div className="tabular font-display text-lg font-semibold">{me.wallet.toLocaleString()}</div>
@@ -233,7 +293,7 @@ export default function Room() {
                     </div>
                   </div>
                 )}
-              </div>
+              </button>
             )}
 
             <button className="btn-ghost px-3 py-2 text-sm" onClick={() => setShowRules(true)}>
@@ -258,7 +318,7 @@ export default function Room() {
 
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6">
         {phase === 'lobby' && (
-          <LobbyView roomState={roomState} online={online} />
+          <LobbyView roomState={roomState} online={online} playerId={playerId} />
         )}
 
         {phase === 'submission' && (
@@ -304,7 +364,14 @@ export default function Room() {
               )}
             </div>
 
-            <div className="lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto lg:pr-1">
+            <div className="flex flex-col gap-6 lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto lg:pr-1">
+              <Leaderboard
+                players={roomState.players}
+                myPlayerId={playerId}
+                limit={5}
+                title="Standings"
+                onShowAll={() => setShowBoard(true)}
+              />
               <EntryFeed
                 submissions={roomState.submissions}
                 voteCounts={roomState.voteCounts}
@@ -322,9 +389,19 @@ export default function Room() {
         )}
 
         {phase === 'results' && state.summary && (
-          <div className="mx-auto flex max-w-3xl flex-col gap-6">
-            <ResultsPanel summary={state.summary} myPlayerId={playerId} />
-            <p className="text-center text-ink-3">Waiting for the host to start the next round…</p>
+          <div className="mx-auto grid max-w-6xl items-start gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+            <div className="flex flex-col gap-6">
+              <ResultsPanel summary={state.summary} myPlayerId={playerId} />
+              <p className="text-center text-ink-3">Waiting for the host to start the next round…</p>
+            </div>
+            <div className="lg:sticky lg:top-24">
+              <Leaderboard
+                players={roomState.players}
+                myPlayerId={playerId}
+                deltas={state.summary.deltas}
+                title="Standings after this round"
+              />
+            </div>
           </div>
         )}
 
@@ -340,17 +417,37 @@ export default function Room() {
       </main>
 
       {showRules && <RulesDialog config={config} onClose={() => setShowRules(false)} />}
+      {state.intro && (
+        <RoundIntro
+          key={state.intro.round}
+          round={state.intro.round}
+          title={state.intro.title}
+          onDone={() => dispatch({ type: 'INTRO_DONE' })}
+        />
+      )}
+      {state.reveal && state.summary && phase === 'results' && (
+        <StandingsReveal
+          round={roomState.roundNumber}
+          players={roomState.players}
+          summary={state.summary}
+          myPlayerId={playerId}
+          onClose={closeReveal}
+        />
+      )}
+      {showBoard && (
+        <LeaderboardDialog players={roomState.players} myPlayerId={playerId} onClose={() => setShowBoard(false)} />
+      )}
     </div>
   )
 }
 
 // ─── Lobby ────────────────────────────────────────────────────────────────────
 
-function LobbyView({ roomState, online }: { roomState: RoomState; online: number }) {
+function LobbyView({ roomState, online, playerId }: { roomState: RoomState; online: number; playerId: string }) {
   const [copied, setCopied] = useState(false)
 
   return (
-    <div className="mx-auto flex max-w-4xl flex-col gap-8">
+    <div className="mx-auto flex max-w-6xl flex-col gap-8">
       <section className="flex flex-col items-center gap-5 py-6 text-center">
         <div className="flex items-center gap-3 font-display text-xl font-semibold text-ink-3 sm:text-2xl">
           <span>x</span>
@@ -379,10 +476,13 @@ function LobbyView({ roomState, online }: { roomState: RoomState; online: number
         </button>
       </section>
 
-      <section className="card">
-        <h2 className="mb-5 text-2xl font-semibold">How to play</h2>
-        <RulesContent config={roomState.room.config} />
-      </section>
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <section className="card">
+          <h2 className="mb-5 text-2xl font-semibold">How to play</h2>
+          <RulesContent config={roomState.room.config} />
+        </section>
+        <Leaderboard players={roomState.players} myPlayerId={playerId} />
+      </div>
     </div>
   )
 }

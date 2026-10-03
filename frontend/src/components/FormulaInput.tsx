@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { parseFormula, FormulaError, MAX_FORMULA_LENGTH, type Node } from '../../../shared/expression'
 import { FormulaNode } from '../lib/formula'
+import { apiUrl } from '../lib/backend'
 
 interface FormulaInputProps {
   columns: string[]
@@ -73,7 +74,7 @@ export default function FormulaInput({
     setServerError('')
     setSubmitting(true)
     try {
-      const res = await fetch(`/api/rooms/${roomId}/submit`, {
+      const res = await fetch(apiUrl(`/api/rooms/${roomId}/submit`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ playerId, expr: text }),

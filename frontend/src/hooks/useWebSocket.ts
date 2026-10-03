@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useLayoutEffect } from 'react'
 import type { ServerMessage } from '../types'
+import { wsUrl } from '../lib/backend'
 
 interface UseWebSocketOptions {
   roomId: string
@@ -31,9 +32,7 @@ export function useWebSocket({ roomId, playerId, onMessage, onOpen, onClose }: U
   const connect = useCallback(() => {
     if (unmounted.current) return
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host     = window.location.host
-    const url      = `${protocol}//${host}/ws?roomId=${roomId}&playerId=${playerId}`
+    const url = wsUrl(`/ws?roomId=${roomId}&playerId=${playerId}`)
 
     let ws: WebSocket
     try {

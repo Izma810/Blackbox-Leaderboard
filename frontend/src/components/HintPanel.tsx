@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { apiUrl } from '../lib/backend'
 
 interface HintPanelProps {
   roomId: string
@@ -21,7 +22,7 @@ export default function HintPanel({ roomId, playerId, hints, hintCount, cost, wa
     setError('')
     setBuying(true)
     try {
-      const res = await fetch(`/api/rooms/${roomId}/hint`, {
+      const res = await fetch(apiUrl(`/api/rooms/${roomId}/hint`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ playerId }),

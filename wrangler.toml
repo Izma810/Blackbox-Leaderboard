@@ -7,16 +7,21 @@ compatibility_flags = ["nodejs_compat"]
 name = "GAME_ROOM"
 class_name = "GameRoomDO"
 
+# SQLite-backed Durable Objects — the only kind allowed on the Workers Free plan.
+# A class's storage type is fixed at its first deploy, so don't change this later.
 [[migrations]]
 tag = "v1"
-new_classes = ["GameRoomDO"]
+new_sqlite_classes = ["GameRoomDO"]
 
 [[d1_databases]]
 binding = "DB"
 database_name = "blackbox-leaderboard"
-database_id = "placeholder-run-wrangler-d1-create"
+# Replace with the id printed by: npx wrangler d1 create blackbox-leaderboard
+database_id = "664e0dc2-3308-44be-bd39-ca086368c765"
 
 [vars]
-ENVIRONMENT = "development"
-# Override this for production with: wrangler secret put ADMIN_PASSWORD
-ADMIN_PASSWORD = "root"
+ENVIRONMENT = "production"
+
+# ADMIN_PASSWORD is a secret, not a var:
+#   local:      ADMIN_PASSWORD=... in .dev.vars (gitignored)
+#   production: npx wrangler secret put ADMIN_PASSWORD

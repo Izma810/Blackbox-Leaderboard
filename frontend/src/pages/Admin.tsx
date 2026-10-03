@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import type { RoomState } from '../types'
 import { Formula } from '../lib/formula'
 import Timer from '../components/Timer'
+import { apiUrl } from '../lib/backend'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -74,7 +75,7 @@ export default function Admin() {
 
 async function verifyPassword(pwd: string): Promise<boolean> {
   try {
-    const res = await fetch('/api/admin/auth', {
+    const res = await fetch(apiUrl('/api/admin/auth'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: pwd }),
@@ -91,6 +92,9 @@ function authHeader(pwd: string): Record<string, string> {
 
 function getSavedRooms(): SavedRoom[] {
   try { return JSON.parse(localStorage.getItem(ROOMS_KEY) ?? '[]') } catch { return [] }
+}
+function forgetRoom(id: string) {
+  localStorage.setItem(ROOMS_KEY, JSON.stringify(getSavedRooms().filter((r) => r.id !== id)))
 }
 function saveRoom(room: SavedRoom) {
   const rooms = getSavedRooms().filter((r) => r.id !== room.id)
@@ -177,9 +181,11 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
   const [cfgDraft, setCfgDraft]             = useState<Record<string, unknown>>({})
   const [confirmEnd, setConfirmEnd]         = useState(false)
   const [copied, setCopied]                 = useState(false)
+  const [missing, setMissing]               = useState(false)
+  const [confirmDelete, setConfirmDelete]   = useState(false)
 
   useEffect(() => {
-    fetch('/api/admin/puzzles')
+    fetch(apiUrl('/api/admin/puzzles'))
       .then((r) => r.json())
       .then((d: any) => setPuzzles(d.puzzles ?? []))
       .catch(() => {})
@@ -189,11 +195,14 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
   const fetchState = useCallback(async () => {
     if (!activeRoomId) return
     try {
-      const res = await fetch(`/api/rooms/${activeRoomId}/admin/state`, {
+      const res = await fetch(apiUrl(`/api/rooms/${activeRoomId}/admin/state`), {
         headers: authHeader(password),
       })
       if (res.ok) setRoomState(await res.json())
-      else setRoomState(null)
+      else {
+        setRoomState(null)
+        if (res.status === 404) setMissing(true)
+      }
     } catch {}
   }, [activeRoomId, password])
 
@@ -202,6 +211,8 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
     setActionErr('')
     setEditConfig(false)
     setConfirmEnd(false)
+    setConfirmDelete(false)
+    setMissing(false)
     if (!activeRoomId) return
     fetchState()
     const id = setInterval(fetchState, 2000)
@@ -214,7 +225,7 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
     if (!newRoomName.trim()) return
     setCreating(true)
     try {
-      const res = await fetch('/api/rooms', {
+      const res = await fetch(apiUrl('/api/rooms'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader(password) },
         body: JSON.stringify({ name: newRoomName.trim() }),
@@ -238,7 +249,7 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
     setActionErr('')
     setLoading(true)
     try {
-      const res = await fetch(`/api/rooms/${activeRoomId}/admin/${action}`, {
+      const res = await fetch(apiUrl(`/api/rooms/${activeRoomId}/admin/${action}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader(password) },
         body: JSON.stringify(body),
@@ -253,11 +264,40 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
     }
   }
 
+  /** Drop a room from the sidebar and move to the next one */
+  function removeFromList(id: string) {
+    forgetRoom(id)
+    const rest = getSavedRooms()
+    setSavedRooms(rest)
+    setActiveRoomId(rest[0]?.id ?? '')
+    if (rest.length === 0) setShowCreate(true)
+  }
+
+  async function deleteRoom() {
+    setActionErr('')
+    setLoading(true)
+    try {
+      const res = await fetch(apiUrl(`/api/rooms/${activeRoomId}`), {
+        method: 'DELETE',
+        headers: authHeader(password),
+      })
+      const data = await res.json() as { error?: string }
+      // 404 means it's already gone — still clear it from the list
+      if (!res.ok && res.status !== 404) { setActionErr(data.error ?? 'Could not delete the room'); return }
+      removeFromList(activeRoomId)
+    } catch {
+      setActionErr('Network error')
+    } finally {
+      setLoading(false)
+      setConfirmDelete(false)
+    }
+  }
+
   async function saveConfig() {
     setActionErr('')
     setLoading(true)
     try {
-      const res = await fetch(`/api/rooms/${activeRoomId}/admin/config`, {
+      const res = await fetch(apiUrl(`/api/rooms/${activeRoomId}/admin/config`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', ...authHeader(password) },
         body: JSON.stringify(cfgDraft),
@@ -350,8 +390,18 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
             <div className="flex flex-1 items-center justify-center text-ink-3">Create a room to get started.</div>
           )}
 
-          {activeRoomId && !roomState && (
+          {activeRoomId && !roomState && !missing && (
             <div className="flex flex-1 items-center justify-center text-ink-3">Loading…</div>
+          )}
+
+          {activeRoomId && missing && (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+              <h2 className="text-2xl font-semibold">This room no longer exists</h2>
+              <p className="max-w-sm text-ink-3">It was deleted, or the local database was reset.</p>
+              <button className="btn-secondary mt-1" onClick={() => removeFromList(activeRoomId)}>
+                Remove from list
+              </button>
+            </div>
           )}
 
           {activeRoomId && roomState && (
@@ -599,6 +649,32 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
                           </button>
                         </div>
                       </div>
+                    )}
+                  </section>
+
+                  {/* Delete */}
+                  <section className="flex flex-col gap-4 rounded-2xl border-2 border-down/30 bg-down-soft/40 p-6">
+                    <div>
+                      <h2 className="text-xl font-semibold">Delete this room</h2>
+                      <p className="mt-1 text-sm text-ink-2">
+                        Removes the room, its players, rounds, formulas, votes and wallets for good.
+                        Anyone still in the room is sent back to the home page.
+                      </p>
+                    </div>
+                    {confirmDelete ? (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <span className="text-sm font-semibold text-down">
+                          Delete “{roomState.room.name}” forever? This can't be undone.
+                        </span>
+                        <button onClick={deleteRoom} className="btn-danger" disabled={loading}>
+                          {loading ? 'Deleting…' : 'Yes, delete it'}
+                        </button>
+                        <button onClick={() => setConfirmDelete(false)} className="btn-ghost">Cancel</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setConfirmDelete(true)} className="btn-secondary w-fit text-down" disabled={loading}>
+                        Delete room…
+                      </button>
                     )}
                   </section>
                 </div>

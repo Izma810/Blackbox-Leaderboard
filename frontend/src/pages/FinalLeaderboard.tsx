@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import type { LeaderboardEntry } from '../types'
+import { apiUrl } from '../lib/backend'
 
 const PODIUM = [
   { place: 2, height: 'h-28', tone: 'bg-white' },
@@ -21,8 +22,8 @@ export default function FinalLeaderboard() {
     if (!roomId) return
 
     Promise.all([
-      fetch(`/api/rooms/${roomId}/leaderboard`).then((r) => r.json()),
-      fetch(`/api/rooms/${roomId}`).then((r) => r.json()),
+      fetch(apiUrl(`/api/rooms/${roomId}/leaderboard`)).then((r) => r.json()),
+      fetch(apiUrl(`/api/rooms/${roomId}`)).then((r) => r.json()),
     ]).then(([lb, room]: any[]) => {
       setEntries(lb.leaderboard ?? [])
       setRoomName(room.name ?? roomId)

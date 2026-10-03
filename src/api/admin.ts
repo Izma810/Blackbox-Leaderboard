@@ -77,6 +77,8 @@ admin.get('/rooms/:id/admin/state', async (c) => {
   if (!await canAccessRoom(c.env, roomId, c.req.header('Authorization'))) {
     return c.json({ error: 'Unauthorized' }, 401)
   }
+  const exists = await c.env.DB.prepare('SELECT 1 FROM rooms WHERE id = ?').bind(roomId).first()
+  if (!exists) return c.json({ error: 'Room not found' }, 404)
 
   const doId = c.env.GAME_ROOM.idFromName(roomId)
   const stub = c.env.GAME_ROOM.get(doId)
@@ -142,6 +144,16 @@ admin.post('/rooms/:id/admin/end-game', async (c) => {
   }
 
   return routeToDO(c.env, roomId, 'end-game', {})
+})
+
+// DELETE /api/rooms/:id — permanently delete a room and everything in it.
+// Master password only: a per-room token is not enough to destroy data.
+admin.delete('/rooms/:id', async (c) => {
+  const roomId = c.req.param('id')
+  if (!isMasterAuth(c.env, c.req.header('Authorization'))) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+  return routeToDO(c.env, roomId, 'delete', {})
 })
 
 // ─── DO proxy helper ─────────────────────────────────────────────────────────

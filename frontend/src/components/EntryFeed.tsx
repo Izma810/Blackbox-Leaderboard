@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PublicSubmission, VoteCount, VoteType } from '../types'
 import { Formula } from '../lib/formula'
+import { apiUrl } from '../lib/backend'
 
 interface EntryFeedProps {
   submissions: PublicSubmission[]
@@ -55,7 +56,7 @@ export default function EntryFeed({
     setError('')
     setPending(submissionId)
     try {
-      const res = await fetch(`/api/rooms/${roomId}/vote`, {
+      const res = await fetch(apiUrl(`/api/rooms/${roomId}/vote`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ playerId: myPlayerId, submissionId, voteType }),

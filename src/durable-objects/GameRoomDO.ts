@@ -87,6 +87,7 @@ export class GameRoomDO implements DurableObject {
       case 'admin/end-game':       return this.serialized(() => this.handleEndGame(roomId))
       case 'admin/config':         return this.serialized(() => this.handleUpdateConfig(roomId, body))
       case 'admin/delete':         return this.serialized(() => this.handleDeleteRoom(roomId))
+      case 'admin/reset-login':    return this.serialized(() => this.handleResetLogin(roomId, body))
       case 'state':                return this.handleGetState(roomId)
       default:                     return new Response('Not found', { status: 404 })
     }
@@ -526,6 +527,26 @@ export class GameRoomDO implements DurableObject {
     this.connections.clear()
     await this.ctx.storage.deleteAlarm()
     await this.ctx.storage.deleteAll()
+
+    return jsonRes({ ok: true })
+  }
+
+  // ─── Admin: reset a player's login ────────────────────────────────────────
+
+  private async handleResetLogin(roomId: string, body: Record<string, unknown>): Promise<Response> {
+    const playerId = typeof body.playerId === 'string' ? body.playerId : ''
+    const res = await this.env.DB
+      .prepare('UPDATE players SET token = NULL WHERE id = ? AND room_id = ?')
+      .bind(playerId, roomId).run()
+    if (res.meta.changes !== 1) return jsonRes({ error: 'Player not found in this room' }, 404)
+
+    // 4001 tells the client its session is gone, so it stops reconnecting
+    const ws = this.connections.get(playerId)
+    if (ws) {
+      this.connections.delete(playerId)
+      try { ws.close(4001, 'Login reset by host') } catch { /* already closed */ }
+      await this.onPlayerDisconnect(playerId)
+    }
 
     return jsonRes({ ok: true })
   }

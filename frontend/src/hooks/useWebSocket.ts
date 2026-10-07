@@ -8,7 +8,7 @@ interface UseWebSocketOptions {
   token: string
   onMessage: (msg: ServerMessage) => void
   onOpen?: () => void
-  onClose?: () => void
+  onClose?: (code: number) => void
 }
 
 export function useWebSocket({ roomId, playerId, token, onMessage, onOpen, onClose }: UseWebSocketOptions) {
@@ -65,7 +65,7 @@ export function useWebSocket({ roomId, playerId, token, onMessage, onOpen, onClo
     }
 
     ws.onclose = (evt) => {
-      onCloseRef.current?.()
+      onCloseRef.current?.(evt.code)
       wsRef.current = null
 
       if (unmounted.current) return

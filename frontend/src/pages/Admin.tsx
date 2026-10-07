@@ -183,6 +183,8 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
   const [copied, setCopied]                 = useState(false)
   const [missing, setMissing]               = useState(false)
   const [confirmDelete, setConfirmDelete]   = useState(false)
+  const [confirmReset, setConfirmReset]     = useState<string | null>(null)
+  const [resetDone, setResetDone]           = useState<string | null>(null)
 
   useEffect(() => {
     fetch(apiUrl('/api/admin/puzzles'))
@@ -212,6 +214,8 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
     setEditConfig(false)
     setConfirmEnd(false)
     setConfirmDelete(false)
+    setConfirmReset(null)
+    setResetDone(null)
     setMissing(false)
     if (!activeRoomId) return
     fetchState()
@@ -245,7 +249,7 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
     }
   }
 
-  async function doAction(action: string, body: unknown = {}) {
+  async function doAction(action: string, body: unknown = {}): Promise<boolean> {
     setActionErr('')
     setLoading(true)
     try {
@@ -255,13 +259,20 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
         body: JSON.stringify(body),
       })
       const data = await res.json() as { error?: string }
-      if (!res.ok) setActionErr(data.error ?? 'Action failed')
-      else fetchState()
+      if (!res.ok) { setActionErr(data.error ?? 'Action failed'); return false }
+      fetchState()
+      return true
     } catch {
       setActionErr('Network error')
+      return false
     } finally {
       setLoading(false)
     }
+  }
+
+  async function resetLogin(playerId: string) {
+    setConfirmReset(null)
+    if (await doAction(`players/${playerId}/reset-login`)) setResetDone(playerId)
   }
 
   /** Drop a room from the sidebar and move to the next one */
@@ -683,18 +694,50 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
                 <section className="card flex h-fit flex-col gap-3">
                   <h2 className="text-xl font-semibold">Players ({players.length})</h2>
                   {players.length === 0 && <p className="text-ink-3">Waiting for players to join…</p>}
+                  {players.length > 0 && (
+                    <p className="text-xs text-ink-4">
+                      Lost their login? Check it's really them, reset it, then have them join again with the same name.
+                    </p>
+                  )}
                   <ol className="flex flex-col divide-y divide-line">
                     {players.map((p, i) => (
-                      <li key={p.id} className="flex items-center justify-between gap-3 py-2.5">
-                        <div className="flex min-w-0 items-center gap-2.5">
-                          <span className="tabular w-5 text-sm text-ink-4">{i + 1}</span>
-                          <span
-                            className={`h-2 w-2 shrink-0 rounded-full ${p.isConnected ? 'bg-up' : 'bg-line'}`}
-                            title={p.isConnected ? 'Online' : 'Offline'}
-                          />
-                          <span className="truncate font-medium">{p.username}</span>
+                      <li key={p.id} className="flex flex-col gap-1.5 py-2.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex min-w-0 items-center gap-2.5">
+                            <span className="tabular w-5 text-sm text-ink-4">{i + 1}</span>
+                            <span
+                              className={`h-2 w-2 shrink-0 rounded-full ${p.isConnected ? 'bg-up' : 'bg-line'}`}
+                              title={p.isConnected ? 'Online' : 'Offline'}
+                            />
+                            <span className="truncate font-medium">{p.username}</span>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-3">
+                            {confirmReset === p.id ? (
+                              <>
+                                <button className="text-xs font-semibold text-down hover:underline" disabled={loading} onClick={() => resetLogin(p.id)}>
+                                  Confirm reset
+                                </button>
+                                <button className="text-xs text-ink-3 hover:underline" onClick={() => setConfirmReset(null)}>
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                className="text-xs text-ink-3 hover:text-ink hover:underline"
+                                onClick={() => { setConfirmReset(p.id); setResetDone(null) }}
+                                title="Sign this player out everywhere so they can rejoin from another device"
+                              >
+                                Reset login
+                              </button>
+                            )}
+                            <span className="tabular font-display font-semibold">{p.wallet.toLocaleString()}</span>
+                          </div>
                         </div>
-                        <span className="tabular font-display font-semibold">{p.wallet.toLocaleString()}</span>
+                        {resetDone === p.id && (
+                          <p className="pl-[3.25rem] text-xs text-up">
+                            Done. The next person to join as “{p.username}” gets this account, so have them join now.
+                          </p>
+                        )}
                       </li>
                     ))}
                   </ol>

@@ -106,6 +106,10 @@ taken name, to open the WebSocket, and to post, vote or buy hints.
 
 - Rejoining with the same name works only from the browser that holds the token.
   From anywhere else the name is taken.
+- **Lost login** (cleared browser, new device): the host clicks **Reset login** next to
+  the player in the admin panel. That signs out whoever holds the old token, and the
+  next join with that name takes the account back with its wallet. Have the player
+  join right after the reset — until they do, anyone could claim the name.
 - Players created before tokens existed have none. The first join with their name
   claims it and gets a token; after that the name is locked.
 
@@ -201,6 +205,7 @@ own admin token (returned when the room is created), except delete.
 | `POST` | `/api/rooms/:id/admin/start-round` | `{ puzzleId }` | Start a round |
 | `POST` | `/api/rooms/:id/admin/advance-phase` | — | End the live round now, or close the results |
 | `POST` | `/api/rooms/:id/admin/end-game` | — | Finish the game |
+| `POST` | `/api/rooms/:id/admin/players/:playerId/reset-login` | — | Clear a player's token and sign them out (WebSocket close `4001`) |
 | `DELETE` | `/api/rooms/:id` | — | Delete the room and all its data (master password only) |
 
 ### WebSocket messages (server → client)

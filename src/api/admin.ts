@@ -146,6 +146,18 @@ admin.post('/rooms/:id/admin/end-game', async (c) => {
   return routeToDO(c.env, roomId, 'end-game', {})
 })
 
+// POST /api/rooms/:id/admin/players/:playerId/reset-login
+// For a player who lost their browser session: their next join with the same name
+// takes the account back. Whoever holds the old session is signed out.
+admin.post('/rooms/:id/admin/players/:playerId/reset-login', async (c) => {
+  const roomId = c.req.param('id')
+  if (!await canAccessRoom(c.env, roomId, c.req.header('Authorization'))) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  return routeToDO(c.env, roomId, 'reset-login', { playerId: c.req.param('playerId') })
+})
+
 // DELETE /api/rooms/:id — permanently delete a room and everything in it.
 // Master password only: a per-room token is not enough to destroy data.
 admin.delete('/rooms/:id', async (c) => {

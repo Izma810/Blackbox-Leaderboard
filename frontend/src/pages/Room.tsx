@@ -203,7 +203,11 @@ export default function Room() {
   }, [navigate, roomId])
 
   const onOpen  = useCallback(() => dispatch({ type: 'CONNECTED', v: true }),  [])
-  const onClose = useCallback(() => dispatch({ type: 'CONNECTED', v: false }), [])
+  const [signedOut, setSignedOut] = useState(false)
+  const onClose = useCallback((code: number) => {
+    dispatch({ type: 'CONNECTED', v: false })
+    if (code === 4001) setSignedOut(true)
+  }, [])
 
   useWebSocket({ roomId, playerId, token: session?.token ?? '', onMessage, onOpen, onClose })
 
@@ -215,8 +219,8 @@ export default function Room() {
   }, [roomId])
 
   useEffect(() => {
-    if (state.deleted) clearSession(roomId)
-  }, [state.deleted, roomId])
+    if (state.deleted || signedOut) clearSession(roomId)
+  }, [state.deleted, signedOut, roomId])
 
   const closeReveal = useCallback(() => dispatch({ type: 'REVEAL_DONE' }), [])
 
@@ -230,6 +234,16 @@ export default function Room() {
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
         <h1 className="text-4xl font-bold">This room was deleted</h1>
         <p className="max-w-sm text-ink-3">The host closed it for good. Ask them for a new room code to keep playing.</p>
+        <button className="btn-primary mt-2" onClick={() => navigate('/')}>Back to home</button>
+      </div>
+    )
+  }
+
+  if (signedOut) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
+        <h1 className="text-4xl font-bold">You were signed out</h1>
+        <p className="max-w-sm text-ink-3">The host reset the login for this player, so it can be used on another device.</p>
         <button className="btn-primary mt-2" onClick={() => navigate('/')}>Back to home</button>
       </div>
     )

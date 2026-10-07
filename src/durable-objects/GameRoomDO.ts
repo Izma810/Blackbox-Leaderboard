@@ -1,46 +1,29 @@
 import type {
-  Env, ServerMessage, RoomState, PublicSubmission, RoundResult, RoundSummary,
-  WalletDelta, LeaderboardEntry, PuzzleForPlayers, Round, Room, VoteType,
+  Env, ServerMessage, GameState, TeamInfo, BatchInfo, BatchSummary,
+  BatchId, LeaderboardEntry, VoteType, Verdict,
 } from '../types'
-import { PUZZLE_MAP, getPuzzleForPlayers } from '../game/puzzles'
-import { compileFormula, judge, normalisedDistance, DUPLICATE_TOLERANCE } from '../game/formula'
+import { PUZZLE_MAP, PUZZLES_BY_BATCH, getPuzzleInfo, getPuzzleForPlayers, BATCH_NAMES } from '../game/puzzles'
+import { IMAGE_PUZZLE_MAP, IMAGE_PUZZLES_BY_BATCH, getImagePuzzleInfo, ALL_TRANSFORM_NAMES } from '../game/imagePuzzles'
+import { compileFormula, judge, isDuplicatePrediction } from '../game/formula'
 import {
-  getRoomById, getPlayersByRoom, getPlayerById, getCurrentRound,
-  getSubmissionsForRound, buildPublicSubmissions, getVoteCountsForRound,
-  getVoteCountForSubmission, getPlayerVoteCount, getPlayerVotes,
+  getConfig, getAllTeams, getTeamById, getAllBatches, getBatchById,
+  getSubmissionsForPuzzle, getSubmissionsForBatch, buildPublicSubmission,
+  getTeamVotesUsed, getVoteCountForSubmission, getHintsBought,
+  getTeamSubmissionMap, rowToBatchInfo,
 } from '../db/d1'
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Row = Record<string, any>
+
 function jsonRes(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
+  return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
-/**
- * Money rules. From room config: Ps = post stake, Pp = post payout,
- * Vs = vote stake, Bp = back payout (always > Pp, so backing a right answer
- * pays more than posting it).
- *
- *   Posting, voting and hints are paid for up front — the coins leave your
- *   wallet immediately. When the round ends each formula is judged and settled:
- *
- *              RIGHT                        CLOSE (right shape,         WRONG
- *                                           wrong numbers)
- *   poster     stake back + Pp              stake back + Pp/2           stake lost to bank
- *              + every doubter's stake                                  − Vs paid to each doubter
- *   backer     stake back + Bp              stake back + Bp/2           stake lost to bank
- *   doubter    stake goes to the poster     stake back                  stake back + Vs from poster
- */
 export class GameRoomDO implements DurableObject {
-  private connections = new Map<string, WebSocket>()  // playerId → WebSocket
-  private ctx: DurableObjectState
-  private env: Env
-  /**
-   * D1 calls are not covered by Durable Object input gates, so concurrent
-   * requests can interleave across awaits. Every state-changing operation runs
-   * through this queue to keep budget, wallet and duplicate checks race-free.
-   */
+  /** teamId → Set<WebSocket> — multiple laptops per team */
+  private connections = new Map<string, Set<WebSocket>>()
+  private ctx:   DurableObjectState
+  private env:   Env
   private queue: Promise<unknown> = Promise.resolve()
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -54,724 +37,759 @@ export class GameRoomDO implements DurableObject {
     return run
   }
 
-  // ─── Main fetch dispatcher ────────────────────────────────────────────────
+  // ─── Main dispatcher ──────────────────────────────────────────────────────
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
-    // Persist roomId on first request so the alarm handler can find it
-    const roomId = request.headers.get('X-Room-Id') ?? url.searchParams.get('roomId') ?? ''
-    if (roomId) {
-      const stored = await this.ctx.storage.get<string>('roomId')
-      if (!stored) await this.ctx.storage.put('roomId', roomId)
-    }
-
-    // WebSocket upgrade
     if (request.headers.get('Upgrade') === 'websocket') {
-      return this.handleWebSocket(url, roomId)
+      return this.handleWebSocket(request)
     }
 
-    // Internal HTTP actions
     const action = url.pathname.replace(/^\/+/, '')
-    let body: Record<string, unknown> = {}
+    let body: Row = {}
     if (request.method !== 'GET' && request.method !== 'DELETE') {
-      try { body = await request.json() } catch { /* empty body is fine */ }
+      try { body = await request.json() } catch { /* empty body */ }
     }
 
     switch (action) {
-      case 'submit':               return this.serialized(() => this.handleSubmit(roomId, body))
-      case 'vote':                 return this.serialized(() => this.handleVote(roomId, body))
-      case 'hint':                 return this.serialized(() => this.handleHint(roomId, body))
-      case 'admin/start-round':    return this.serialized(() => this.handleStartRound(roomId, body))
-      case 'admin/advance-phase':  return this.serialized(() => this.handleAdvancePhase(roomId))
-      case 'admin/end-game':       return this.serialized(() => this.handleEndGame(roomId))
-      case 'admin/config':         return this.serialized(() => this.handleUpdateConfig(roomId, body))
-      case 'admin/delete':         return this.serialized(() => this.handleDeleteRoom(roomId))
-      case 'admin/reset-login':    return this.serialized(() => this.handleResetLogin(roomId, body))
-      case 'state':                return this.handleGetState(roomId)
-      default:                     return new Response('Not found', { status: 404 })
+      case 'submit':              return this.serialized(() => this.handleSubmit(body))
+      case 'vote':                return this.serialized(() => this.handleVote(body))
+      case 'hint':                return this.serialized(() => this.handleHint(body))
+      case 'team-joined':         return this.serialized(() => this.handleTeamJoined(body))
+      case 'admin/open-batch':    return this.serialized(() => this.handleOpenBatch(body))
+      case 'admin/update-batch':  return this.serialized(() => this.handleUpdateBatch(body))
+      case 'admin/settle-batch':  return this.serialized(() => this.handleSettleBatch(body))
+      case 'admin/reopen-batch':  return this.serialized(() => this.handleReopenBatch(body))
+      case 'admin/end-game':      return this.serialized(() => this.handleEndGame())
+      case 'admin/reset':         return this.serialized(() => this.handleReset())
+      case 'admin/config':        return this.serialized(() => this.handleUpdateConfig(body))
+      case 'admin/remove-team':   return this.serialized(() => this.handleRemoveTeam(body))
+      default:                    return new Response('Not found', { status: 404 })
     }
   }
 
-  // ─── Alarm (round timer) ──────────────────────────────────────────────────
+  // ─── WebSocket ────────────────────────────────────────────────────────────
 
-  async alarm(): Promise<void> {
-    const roomId = await this.ctx.storage.get<string>('roomId')
-    if (!roomId) return
-    await this.serialized(async () => {
-      const round = await getCurrentRound(this.env.DB, roomId)
-      // Only the live phase is timed; ignore stale alarms
-      if (round?.phase === 'submission') await this.transitionToResults(roomId, round)
-    })
-  }
-
-  // ─── WebSocket handling ───────────────────────────────────────────────────
-
-  private handleWebSocket(url: URL, roomId: string): Response {
-    const playerId = url.searchParams.get('playerId') ?? ''
+  private handleWebSocket(request: Request): Response {
+    const teamId = request.headers.get('X-Team-Id') ?? ''
+    if (!teamId) return new Response('Missing X-Team-Id', { status: 400 })
 
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket]
     server.accept()
 
-    this.connections.set(playerId, server)
+    if (!this.connections.has(teamId)) this.connections.set(teamId, new Set())
+    const sockets = this.connections.get(teamId)!
+    const wasOnline = sockets.size > 0
+    sockets.add(server)
 
     server.addEventListener('message', (evt: MessageEvent) => {
       try {
         const msg = JSON.parse(evt.data as string)
         if (msg.type === 'PING') server.send(JSON.stringify({ type: 'PONG' }))
-      } catch { /* ignore malformed messages */ }
+      } catch { /* ignore */ }
     })
 
     server.addEventListener('close', () => {
-      if (this.connections.get(playerId) === server) this.connections.delete(playerId)
-      this.ctx.waitUntil(this.onPlayerDisconnect(playerId))
+      sockets.delete(server)
+      if (sockets.size === 0) {
+        this.connections.delete(teamId)
+        this.ctx.waitUntil(this.onTeamOffline(teamId))
+      }
     })
 
     server.addEventListener('error', () => {
-      if (this.connections.get(playerId) === server) this.connections.delete(playerId)
+      sockets.delete(server)
+      if (sockets.size === 0) this.connections.delete(teamId)
     })
 
-    // Send initial state and notify others asynchronously
-    this.ctx.waitUntil(this.initConnection(server, playerId, roomId))
-
+    this.ctx.waitUntil(this.initConnection(server, teamId, wasOnline))
     return new Response(null, { status: 101, webSocket: client })
   }
 
-  private async initConnection(server: WebSocket, playerId: string, roomId: string) {
+  private async initConnection(server: WebSocket, teamId: string, wasOnline: boolean) {
     try {
-      await this.env.DB
-        .prepare('UPDATE players SET is_connected = 1 WHERE id = ?')
-        .bind(playerId).run()
-
-      const state = await this.buildRoomState(roomId, playerId)
+      if (!wasOnline) {
+        await this.env.DB.prepare('UPDATE teams SET is_connected = 1 WHERE id = ?').bind(teamId).run()
+      }
+      const state = await this.buildGameState(teamId)
       server.send(JSON.stringify({ type: 'FULL_STATE', state } satisfies ServerMessage))
-
-      const player = state.players.find((p) => p.id === playerId)
-      if (player) this.broadcast({ type: 'PLAYER_JOINED', player }, playerId)
+      if (!wasOnline) {
+        const team = state.teams.find((t) => t.id === teamId)
+        if (team) this.broadcastExcept({ type: 'TEAM_UPDATED', team }, new Set([teamId]))
+      }
     } catch (e) {
       console.error('[DO] initConnection error:', e)
     }
   }
 
-  private async onPlayerDisconnect(playerId: string) {
+  private async onTeamOffline(teamId: string) {
     try {
-      await this.env.DB
-        .prepare('UPDATE players SET is_connected = 0 WHERE id = ?')
-        .bind(playerId).run()
-      this.broadcast({ type: 'PLAYER_LEFT', playerId })
+      await this.env.DB.prepare('UPDATE teams SET is_connected = 0 WHERE id = ?').bind(teamId).run()
+      const team = await getTeamById(this.env.DB, teamId)
+      if (team) this.broadcast({ type: 'TEAM_UPDATED', team })
     } catch (e) {
-      console.error('[DO] onPlayerDisconnect error:', e)
+      console.error('[DO] onTeamOffline error:', e)
     }
   }
 
   // ─── State builder ────────────────────────────────────────────────────────
 
-  private async buildRoomState(roomId: string, playerId?: string): Promise<RoomState> {
-    const [room, players, round] = await Promise.all([
-      getRoomById(this.env.DB, roomId),
-      getPlayersByRoom(this.env.DB, roomId),
-      getCurrentRound(this.env.DB, roomId),
+  private async buildGameState(teamId?: string): Promise<GameState> {
+    const [config, teams] = await Promise.all([
+      getConfig(this.env.DB),
+      getAllTeams(this.env.DB),
     ])
 
-    if (!room) throw new Error('Room not found')
+    const batchRows = await this.env.DB.prepare('SELECT * FROM batches ORDER BY rowid ASC').all<Row>()
+    const batches: BatchInfo[] = batchRows.results.map((r) => {
+      const numPuzzles = (PUZZLES_BY_BATCH[r.id as BatchId] ?? []).map(getPuzzleInfo)
+      const imgPuzzles = (IMAGE_PUZZLES_BY_BATCH[r.id as BatchId] ?? []).map(getImagePuzzleInfo)
+      return rowToBatchInfo(r, [...numPuzzles, ...imgPuzzles])
+    })
 
-    let submissions: PublicSubmission[] = []
-    let voteCounts: RoomState['voteCounts'] = []
-    let myVotes: RoomState['myVotes'] = {}
-    let myHints: string[] = []
-    let summary: RoundSummary | null = null
-    const puzzleData = round ? PUZZLE_MAP.get(round.puzzleId) : undefined
+    let myVotesUsed = 0
+    let mySubmissions: Record<string, Verdict | null> = {}
 
-    if (round) {
-      const rows = await getSubmissionsForRound(this.env.DB, round.id)
-      submissions = buildPublicSubmissions(rows, room.config.anonymousVoting)
-      voteCounts = await getVoteCountsForRound(this.env.DB, round.id)
-      if (playerId) {
-        myVotes = await getPlayerVotes(this.env.DB, round.id, playerId)
-        const bought = await this.hintsBought(round.id, playerId)
-        myHints = puzzleData?.hints.slice(0, bought) ?? []
-      }
-      if (round.phase === 'results') summary = await this.buildSummary(room, round)
+    if (teamId) {
+      const [votes, subs] = await Promise.all([
+        getTeamVotesUsed(this.env.DB, teamId),
+        getTeamSubmissionMap(this.env.DB, teamId),
+      ])
+      myVotesUsed   = votes
+      mySubmissions = subs as Record<string, Verdict | null>
     }
 
-    const completedRounds = await this.env.DB
-      .prepare('SELECT COUNT(*) as cnt FROM rounds WHERE room_id = ? AND ended_at IS NOT NULL')
-      .bind(roomId).first<{ cnt: number }>()
-
-    // Include puzzle data for active rounds (never includes solution)
-    let puzzle: PuzzleForPlayers | null = null
-    if (round) {
-      const p = PUZZLE_MAP.get(round.puzzleId)
-      if (p) puzzle = getPuzzleForPlayers(p)
-    }
-
-    return {
-      room,
-      players,
-      currentRound: round,
-      submissions,
-      voteCounts,
-      myVotes,
-      myHints,
-      roundNumber: (completedRounds?.cnt ?? 0) + (round ? 1 : 0),
-      puzzle,
-      summary,
-    }
+    return { config, teams, batches, myTeamId: teamId ?? null, myVotesUsed, mySubmissions }
   }
 
-  // ─── Submit handler ───────────────────────────────────────────────────────
+  // ─── Submit ───────────────────────────────────────────────────────────────
 
-  private async handleSubmit(roomId: string, body: Record<string, unknown>): Promise<Response> {
-    const playerId = body.playerId as string
-    if (!playerId) return jsonRes({ error: 'Missing playerId' }, 400)
+  private async handleSubmit(body: Row): Promise<Response> {
+    const { teamId, puzzleId, expr } = body as { teamId: string; puzzleId: string; expr: string }
+    if (!teamId || !puzzleId || !expr) return jsonRes({ error: 'Missing fields' }, 400)
 
-    const round = await getCurrentRound(this.env.DB, roomId)
-    if (!round || round.phase !== 'submission') {
-      return jsonRes({ error: 'The round is not live' }, 400)
-    }
+    // Route to image puzzle handler if applicable
+    const imagePuzzle = IMAGE_PUZZLE_MAP.get(puzzleId)
+    if (imagePuzzle) return this.handleImageSubmit(teamId, puzzleId, expr, imagePuzzle)
+
+    const puzzle = PUZZLE_MAP.get(puzzleId)
+    if (!puzzle) return jsonRes({ error: 'Unknown puzzle' }, 404)
+
+    const batch = await getBatchById(this.env.DB, puzzle.batchId)
+    if (!batch || batch.status !== 'open') return jsonRes({ error: 'This batch is not open' }, 400)
+    if (!batch.submissions_open) return jsonRes({ error: 'Submissions are closed for this batch' }, 400)
 
     const already = await this.env.DB
-      .prepare('SELECT id FROM submissions WHERE round_id = ? AND player_id = ?')
-      .bind(round.id, playerId).first()
-    if (already) return jsonRes({ error: 'You already posted a formula this round' }, 409)
+      .prepare('SELECT id FROM submissions WHERE puzzle_id = ? AND team_id = ?')
+      .bind(puzzleId, teamId).first()
+    if (already) return jsonRes({ error: 'Your team already posted a formula for this puzzle' }, 409)
 
-    const puzzle = PUZZLE_MAP.get(round.puzzleId)
-    if (!puzzle) return jsonRes({ error: 'Puzzle not found' }, 500)
-
-    const expr = typeof body.expr === 'string' ? body.expr.trim() : ''
     let prediction: number[]
     try {
-      ({ prediction } = compileFormula(expr, puzzle.X))
+      ({ prediction } = compileFormula(expr.trim(), puzzle.X))
     } catch (e) {
       return jsonRes({ error: (e as Error).message }, 400)
     }
 
-    const [room, player] = await Promise.all([
-      getRoomById(this.env.DB, roomId),
-      getPlayerById(this.env.DB, playerId),
+    const [config, team] = await Promise.all([
+      getConfig(this.env.DB),
+      getTeamById(this.env.DB, teamId),
     ])
-    if (!room || !player) return jsonRes({ error: 'Room or player not found' }, 404)
-
-    const stake = room.config.postStake
-    if (player.wallet < stake) {
-      return jsonRes({ error: `Posting costs ${stake} coins — you have ${player.wallet}` }, 403)
+    if (!team) return jsonRes({ error: 'Team not found' }, 404)
+    if (team.wallet < config.postStake) {
+      return jsonRes({ error: `Posting costs ${config.postStake} coins — you have ${team.wallet}` }, 403)
     }
 
-    // Duplicate check: same predictions as an existing formula ⇒ same answer
-    const existingRows = await getSubmissionsForRound(this.env.DB, round.id)
-    const existing = buildPublicSubmissions(existingRows, room.config.anonymousVoting)
+    // Duplicate prediction check
+    const existing = await getSubmissionsForPuzzle(this.env.DB, puzzleId)
     for (const sub of existing) {
       let other: number[]
       try { ({ prediction: other } = compileFormula(sub.expr, puzzle.X)) } catch { continue }
-      if (normalisedDistance(prediction, other, puzzle.y) < DUPLICATE_TOLERANCE) {
+      if (isDuplicatePrediction(prediction, other, puzzle.y)) {
         return jsonRes({
-          error: `${sub.label} already claimed this formula. Back it with an upvote, or try something different.`,
+          error: `${sub.team_name} already claimed an equivalent formula. Back it with an upvote instead.`,
           duplicateOf: sub.id,
         }, 409)
       }
     }
 
-    const submissionId = crypto.randomUUID()
-    const now = Date.now()
+    const subId = crypto.randomUUID()
+    const now   = Date.now()
     await this.env.DB.batch([
-      this.env.DB
-        .prepare(`INSERT INTO submissions (id, round_id, player_id, features_json, submitted_at)
-                  VALUES (?, ?, ?, ?, ?)`)
-        .bind(submissionId, round.id, playerId, expr, now),
-      ...this.walletStmts(playerId, round.id, -stake, 'post_stake', 'Posted a formula', now),
+      this.env.DB.prepare(
+        'INSERT INTO submissions (id, puzzle_id, batch_id, team_id, expr, stake, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).bind(subId, puzzleId, puzzle.batchId, teamId, expr.trim(), config.postStake, now),
+      this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?')
+        .bind(config.postStake, teamId),
+      this.env.DB.prepare(
+        'INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      ).bind(crypto.randomUUID(), teamId, puzzle.batchId, puzzleId, 'post_stake', -config.postStake, 'Posted a formula', now),
     ])
 
-    const publicSub: PublicSubmission = {
-      id: submissionId,
-      playerId,
-      label: room.config.anonymousVoting ? String.fromCharCode(65 + existing.length) : player.username,
-      expr,
-      submittedAt: now,
-    }
+    const [updatedTeam, allSubs] = await Promise.all([
+      getTeamById(this.env.DB, teamId),
+      getSubmissionsForPuzzle(this.env.DB, puzzleId),
+    ])
+    const publicSub = buildPublicSubmission(
+      allSubs.find((s) => s.id === subId)!, config.anonymousVoting, allSubs.length - 1, false,
+    )
 
-    this.broadcast({ type: 'SUBMISSION_MADE', submission: publicSub })
-    await this.broadcastPlayer(playerId)
+    this.broadcast({ type: 'SUBMISSION_MADE', puzzleId, submission: publicSub })
+    if (updatedTeam) this.broadcast({ type: 'TEAM_UPDATED', team: updatedTeam })
 
-    return jsonRes({ ok: true, submissionId })
+    return jsonRes({ ok: true, submissionId: subId })
   }
 
-  // ─── Vote handler ─────────────────────────────────────────────────────────
+  // ─── Image puzzle submit ───────────────────────────────────────────────────
 
-  private async handleVote(roomId: string, body: Record<string, unknown>): Promise<Response> {
-    const { playerId, submissionId, voteType } = body as {
-      playerId: string; submissionId: string; voteType: VoteType
+  private async handleImageSubmit(
+    teamId: string, puzzleId: string, expr: string,
+    puzzle: import('../game/imagePuzzles').ImagePuzzleDef,
+  ): Promise<Response> {
+    const batch = await getBatchById(this.env.DB, puzzle.batchId)
+    if (!batch || batch.status !== 'open') return jsonRes({ error: 'This batch is not open' }, 400)
+    if (!batch.submissions_open) return jsonRes({ error: 'Submissions are closed for this batch' }, 400)
+
+    const already = await this.env.DB
+      .prepare('SELECT id FROM submissions WHERE puzzle_id = ? AND team_id = ?')
+      .bind(puzzleId, teamId).first()
+    if (already) return jsonRes({ error: 'Your team already submitted an answer for this puzzle' }, 409)
+
+    // Parse and validate filter list
+    let filters: string[]
+    try { filters = JSON.parse(expr) } catch { return jsonRes({ error: 'Invalid filter list' }, 400) }
+    if (!Array.isArray(filters) || filters.some((f) => !ALL_TRANSFORM_NAMES.includes(f as never))) {
+      return jsonRes({ error: 'One or more filters are not valid' }, 400)
+    }
+    if (filters.length === 0) return jsonRes({ error: 'Select at least one filter' }, 400)
+    if (filters.length > puzzle.maxFilters) {
+      return jsonRes({ error: `Maximum ${puzzle.maxFilters} filter(s) allowed` }, 400)
     }
 
-    if (!playerId || !submissionId || !voteType) {
-      return jsonRes({ error: 'Missing required fields' }, 400)
-    }
-    if (voteType !== 'up' && voteType !== 'down') {
-      return jsonRes({ error: 'voteType must be "up" or "down"' }, 400)
+    const [config, team] = await Promise.all([
+      getConfig(this.env.DB),
+      getTeamById(this.env.DB, teamId),
+    ])
+    if (!team) return jsonRes({ error: 'Team not found' }, 404)
+    if (team.wallet < config.postStake) {
+      return jsonRes({ error: `Posting costs ${config.postStake} coins — you have ${team.wallet}` }, 403)
     }
 
-    const round = await getCurrentRound(this.env.DB, roomId)
-    if (!round || round.phase !== 'submission') {
-      return jsonRes({ error: 'The round is not live' }, 400)
-    }
+    const subId = crypto.randomUUID()
+    const now   = Date.now()
+    const normalised = JSON.stringify(filters)   // store as canonical JSON
+
+    await this.env.DB.batch([
+      this.env.DB.prepare(
+        'INSERT INTO submissions (id, puzzle_id, batch_id, team_id, expr, stake, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).bind(subId, puzzleId, puzzle.batchId, teamId, normalised, config.postStake, now),
+      this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?').bind(config.postStake, teamId),
+      this.env.DB.prepare(
+        'INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      ).bind(crypto.randomUUID(), teamId, puzzle.batchId, puzzleId, 'post_stake', -config.postStake, 'Submitted image puzzle answer', now),
+    ])
+
+    const [updatedTeam, allSubs] = await Promise.all([
+      getTeamById(this.env.DB, teamId),
+      getSubmissionsForPuzzle(this.env.DB, puzzleId),
+    ])
+    const publicSub = buildPublicSubmission(
+      allSubs.find((s) => s.id === subId)!, config.anonymousVoting, allSubs.length - 1, false,
+    )
+
+    this.broadcast({ type: 'SUBMISSION_MADE', puzzleId, submission: publicSub })
+    if (updatedTeam) this.broadcast({ type: 'TEAM_UPDATED', team: updatedTeam })
+
+    return jsonRes({ ok: true, submissionId: subId })
+  }
+
+  // ─── Vote ─────────────────────────────────────────────────────────────────
+
+  private async handleVote(body: Row): Promise<Response> {
+    const { teamId, submissionId, voteType } = body as { teamId: string; submissionId: string; voteType: VoteType }
+    if (!teamId || !submissionId || !voteType) return jsonRes({ error: 'Missing fields' }, 400)
+    if (voteType !== 'up' && voteType !== 'down') return jsonRes({ error: 'Invalid voteType' }, 400)
 
     const sub = await this.env.DB
-      .prepare('SELECT player_id FROM submissions WHERE id = ? AND round_id = ?')
-      .bind(submissionId, round.id).first<{ player_id: string }>()
+      .prepare('SELECT team_id, puzzle_id, batch_id FROM submissions WHERE id = ?')
+      .bind(submissionId).first<{ team_id: string; puzzle_id: string; batch_id: string }>()
     if (!sub) return jsonRes({ error: 'Submission not found' }, 404)
-    if (sub.player_id === playerId) return jsonRes({ error: 'You cannot vote on your own formula' }, 403)
+    if (sub.team_id === teamId) return jsonRes({ error: 'You cannot vote on your own team\'s formula' }, 403)
 
-    const [room, player] = await Promise.all([
-      getRoomById(this.env.DB, roomId),
-      getPlayerById(this.env.DB, playerId),
+    const batch = await getBatchById(this.env.DB, sub.batch_id as BatchId)
+    if (!batch || batch.status !== 'open') return jsonRes({ error: 'This batch is not open' }, 400)
+    if (!batch.voting_open) return jsonRes({ error: 'Voting is closed for this batch' }, 400)
+
+    const [config, team] = await Promise.all([
+      getConfig(this.env.DB),
+      getTeamById(this.env.DB, teamId),
     ])
-    if (!room || !player) return jsonRes({ error: 'Room or player not found' }, 404)
+    if (!team) return jsonRes({ error: 'Team not found' }, 404)
 
-    const usedVotes = await getPlayerVoteCount(this.env.DB, round.id, playerId)
-    if (usedVotes >= room.config.votesPerRound) {
-      return jsonRes({ error: 'You have used all your votes this round' }, 403)
+    const votesUsed = await getTeamVotesUsed(this.env.DB, teamId)
+    if (votesUsed >= config.voteBudget) {
+      return jsonRes({ error: `You have used all ${config.voteBudget} votes` }, 403)
     }
 
     const dupVote = await this.env.DB
-      .prepare('SELECT 1 FROM votes WHERE round_id = ? AND voter_id = ? AND submission_id = ?')
-      .bind(round.id, playerId, submissionId).first()
+      .prepare('SELECT 1 FROM votes WHERE voter_team_id = ? AND submission_id = ?')
+      .bind(teamId, submissionId).first()
     if (dupVote) return jsonRes({ error: 'You already voted on this formula' }, 409)
 
-    const stake = room.config.voteStake
-    if (player.wallet < stake) {
-      return jsonRes({ error: `A vote costs ${stake} coins — you have ${player.wallet}` }, 403)
+    if (team.wallet < config.voteStake) {
+      return jsonRes({ error: `Voting costs ${config.voteStake} coins — you have ${team.wallet}` }, 403)
     }
 
     const now = Date.now()
     await this.env.DB.batch([
-      this.env.DB
-        .prepare(`INSERT INTO votes (id, round_id, submission_id, voter_id, vote_type, voted_at)
-                  VALUES (?, ?, ?, ?, ?, ?)`)
-        .bind(crypto.randomUUID(), round.id, submissionId, playerId, voteType, now),
-      ...this.walletStmts(
-        playerId, round.id, -stake, 'vote_stake',
-        voteType === 'up' ? 'Upvoted a formula' : 'Downvoted a formula', now,
-      ),
+      this.env.DB.prepare(
+        'INSERT INTO votes (id, puzzle_id, batch_id, submission_id, voter_team_id, vote_type, stake, voted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      ).bind(crypto.randomUUID(), sub.puzzle_id, sub.batch_id, submissionId, teamId, voteType, config.voteStake, now),
+      this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?')
+        .bind(config.voteStake, teamId),
+      this.env.DB.prepare(
+        'INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      ).bind(crypto.randomUUID(), teamId, sub.batch_id, sub.puzzle_id, 'vote_stake', -config.voteStake,
+        voteType === 'up' ? 'Upvoted a formula' : 'Downvoted a formula', now),
     ])
 
-    const counts = await getVoteCountForSubmission(this.env.DB, submissionId)
-    this.broadcast({ type: 'VOTE_UPDATE', submissionId, ...counts })
-    await this.broadcastPlayer(playerId)
+    const [counts, updatedTeam] = await Promise.all([
+      getVoteCountForSubmission(this.env.DB, submissionId),
+      getTeamById(this.env.DB, teamId),
+    ])
 
-    return jsonRes({ ok: true, votesRemaining: room.config.votesPerRound - usedVotes - 1 })
+    this.broadcast({ type: 'VOTE_CAST', puzzleId: sub.puzzle_id, submissionId, ...counts })
+    if (updatedTeam) this.broadcast({ type: 'TEAM_UPDATED', team: updatedTeam })
+
+    return jsonRes({ ok: true, votesRemaining: config.voteBudget - votesUsed - 1 })
   }
 
-  // ─── Hint handler ─────────────────────────────────────────────────────────
+  // ─── Hint ─────────────────────────────────────────────────────────────────
 
-  private async handleHint(roomId: string, body: Record<string, unknown>): Promise<Response> {
-    const playerId = body.playerId as string
-    if (!playerId) return jsonRes({ error: 'Missing playerId' }, 400)
+  private async handleHint(body: Row): Promise<Response> {
+    const { teamId, puzzleId } = body as { teamId: string; puzzleId: string }
+    if (!teamId || !puzzleId) return jsonRes({ error: 'Missing fields' }, 400)
 
-    const round = await getCurrentRound(this.env.DB, roomId)
-    if (!round || round.phase !== 'submission') {
-      return jsonRes({ error: 'Hints are only available while a round is live' }, 400)
-    }
-    const puzzle = PUZZLE_MAP.get(round.puzzleId)
-    if (!puzzle) return jsonRes({ error: 'Puzzle not found' }, 500)
+    const puzzle = PUZZLE_MAP.get(puzzleId)
+    if (!puzzle) return jsonRes({ error: 'Unknown puzzle' }, 404)
 
-    const [room, player, bought] = await Promise.all([
-      getRoomById(this.env.DB, roomId),
-      getPlayerById(this.env.DB, playerId),
-      this.hintsBought(round.id, playerId),
+    const batch = await getBatchById(this.env.DB, puzzle.batchId)
+    if (!batch || batch.status !== 'open') return jsonRes({ error: 'Hints only available while a batch is open' }, 400)
+
+    const [config, team, bought] = await Promise.all([
+      getConfig(this.env.DB),
+      getTeamById(this.env.DB, teamId),
+      getHintsBought(this.env.DB, puzzleId, teamId),
     ])
-    if (!room || !player) return jsonRes({ error: 'Room or player not found' }, 404)
+    if (!team) return jsonRes({ error: 'Team not found' }, 404)
     if (bought >= puzzle.hints.length) return jsonRes({ error: 'You already have every hint' }, 409)
-
-    const cost = room.config.hintCost
-    if (player.wallet < cost) {
-      return jsonRes({ error: `A hint costs ${cost} coins — you have ${player.wallet}` }, 403)
+    if (team.wallet < config.hintCost) {
+      return jsonRes({ error: `A hint costs ${config.hintCost} coins — you have ${team.wallet}` }, 403)
     }
 
-    await this.env.DB.batch(
-      this.walletStmts(playerId, round.id, -cost, 'hint', `Bought hint ${bought + 1}`, Date.now()),
-    )
-    await this.broadcastPlayer(playerId)
+    const now = Date.now()
+    await this.env.DB.batch([
+      this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?').bind(config.hintCost, teamId),
+      this.env.DB.prepare(
+        'INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      ).bind(crypto.randomUUID(), teamId, puzzle.batchId, puzzleId, 'hint', -config.hintCost,
+        `Bought hint ${bought + 1}`, now),
+    ])
+
+    const updatedTeam = await getTeamById(this.env.DB, teamId)
+    if (updatedTeam) this.broadcast({ type: 'TEAM_UPDATED', team: updatedTeam })
 
     return jsonRes({ ok: true, hints: puzzle.hints.slice(0, bought + 1) })
   }
 
-  private async hintsBought(roundId: string, playerId: string): Promise<number> {
-    const r = await this.env.DB
-      .prepare(`SELECT COUNT(*) as cnt FROM wallet_transactions
-                WHERE round_id = ? AND player_id = ? AND type = 'hint'`)
-      .bind(roundId, playerId).first<{ cnt: number }>()
-    return r?.cnt ?? 0
+  // ─── Team joined (called by auth.ts after registration) ───────────────────
+
+  private async handleTeamJoined(body: Row): Promise<Response> {
+    const team = await getTeamById(this.env.DB, body.teamId)
+    if (team) this.broadcast({ type: 'TEAM_JOINED', team })
+    return jsonRes({ ok: true })
   }
 
-  // ─── Admin: start round ───────────────────────────────────────────────────
+  // ─── Admin: open batch ────────────────────────────────────────────────────
 
-  private async handleStartRound(roomId: string, body: Record<string, unknown>): Promise<Response> {
-    const { puzzleId } = body as { puzzleId: string }
-    if (!puzzleId) return jsonRes({ error: 'Missing puzzleId' }, 400)
-    if (!PUZZLE_MAP.has(puzzleId)) return jsonRes({ error: 'Unknown puzzle' }, 400)
+  private async handleOpenBatch(body: Row): Promise<Response> {
+    const batchId = body.batchId as BatchId
+    const batch = await getBatchById(this.env.DB, batchId)
+    if (!batch) return jsonRes({ error: 'Unknown batch' }, 404)
+    if (batch.status !== 'hidden') return jsonRes({ error: 'Batch is already open or settled' }, 409)
 
-    const room = await getRoomById(this.env.DB, roomId)
-    if (!room) return jsonRes({ error: 'Room not found' }, 404)
-    if (room.status === 'finished') return jsonRes({ error: 'Room is finished' }, 400)
+    const now = Date.now()
+    await this.env.DB.batch([
+      this.env.DB.prepare(
+        "UPDATE batches SET status='open', submissions_open=1, voting_open=1, opened_at=? WHERE id=?",
+      ).bind(now, batchId),
+      this.env.DB.prepare("UPDATE game_config SET status='active' WHERE id=1 AND status='lobby'"),
+    ])
 
-    // Ensure no active round
-    const active = await getCurrentRound(this.env.DB, roomId)
-    if (active && active.phase !== 'results') {
-      return jsonRes({ error: 'A round is still in progress' }, 409)
+    const updated = await getBatchById(this.env.DB, batchId)
+    if (updated) {
+      const numPs = (PUZZLES_BY_BATCH[batchId] ?? []).map(getPuzzleInfo)
+      const imgPs = (IMAGE_PUZZLES_BY_BATCH[batchId] ?? []).map(getImagePuzzleInfo)
+      const bi = rowToBatchInfo(updated, [...numPs, ...imgPs])
+      this.broadcast({ type: 'BATCH_UPDATED', batch: bi })
     }
-
-    // Mark previous results-phase round as ended (if any)
-    if (active?.phase === 'results') {
-      await this.env.DB
-        .prepare('UPDATE rounds SET ended_at = ? WHERE id = ?')
-        .bind(Date.now(), active.id).run()
-    }
-
-    const cnt = await this.env.DB
-      .prepare('SELECT COUNT(*) as cnt FROM rounds WHERE room_id = ?')
-      .bind(roomId).first<{ cnt: number }>()
-    const roundNumber = (cnt?.cnt ?? 0) + 1
-
-    const roundId = crypto.randomUUID()
-    const phaseEndsAt = Date.now() + room.config.phase1Secs * 1000
-    await this.env.DB
-      .prepare(`
-        INSERT INTO rounds (id, room_id, round_number, puzzle_id, phase, phase_ends_at, started_at)
-        VALUES (?, ?, ?, ?, 'submission', ?, ?)
-      `)
-      .bind(roundId, roomId, roundNumber, puzzleId, phaseEndsAt, Date.now())
-      .run()
-
-    const players = await getPlayersByRoom(this.env.DB, roomId)
-    if (players.length > 0) {
-      await this.env.DB.batch(players.map((p) =>
-        this.env.DB
-          .prepare('INSERT OR IGNORE INTO round_players (round_id, player_id) VALUES (?, ?)')
-          .bind(roundId, p.id),
-      ))
-    }
-
-    await this.env.DB
-      .prepare('UPDATE rooms SET status = ? WHERE id = ?')
-      .bind('active', roomId).run()
-
-    await this.ctx.storage.setAlarm(phaseEndsAt)
-
-    const puzzleForBroadcast = getPuzzleForPlayers(PUZZLE_MAP.get(puzzleId)!)
-    this.broadcast({ type: 'PHASE_CHANGED', phase: 'submission', endsAt: phaseEndsAt, puzzle: puzzleForBroadcast })
-
-    return jsonRes({ ok: true, roundId })
+    return jsonRes({ ok: true })
   }
 
-  // ─── Admin: force-advance phase ───────────────────────────────────────────
+  // ─── Admin: update batch toggles ──────────────────────────────────────────
 
-  private async handleAdvancePhase(roomId: string): Promise<Response> {
-    const round = await getCurrentRound(this.env.DB, roomId)
-    if (round?.phase === 'submission') await this.transitionToResults(roomId, round)
-    else if (round?.phase === 'results') await this.closeRound(round)
+  private async handleUpdateBatch(body: Row): Promise<Response> {
+    const batchId = body.batchId as BatchId
+    const batch = await getBatchById(this.env.DB, batchId)
+    if (!batch) return jsonRes({ error: 'Unknown batch' }, 404)
+    if (batch.status !== 'open') return jsonRes({ error: 'Batch must be open to update' }, 409)
+
+    const sets: string[] = []
+    const vals: unknown[] = []
+    if (body.submissionsOpen !== undefined) { sets.push('submissions_open = ?'); vals.push(body.submissionsOpen ? 1 : 0) }
+    if (body.votingOpen      !== undefined) { sets.push('voting_open = ?');      vals.push(body.votingOpen      ? 1 : 0) }
+    if (sets.length === 0) return jsonRes({ error: 'Nothing to update' }, 400)
+
+    vals.push(batchId)
+    await this.env.DB.prepare(`UPDATE batches SET ${sets.join(', ')} WHERE id = ?`).bind(...vals).run()
+
+    const updated = await getBatchById(this.env.DB, batchId)
+    if (updated) {
+      const numPs = (PUZZLES_BY_BATCH[batchId] ?? []).map(getPuzzleInfo)
+      const imgPs = (IMAGE_PUZZLES_BY_BATCH[batchId] ?? []).map(getImagePuzzleInfo)
+      const bi = rowToBatchInfo(updated, [...numPs, ...imgPs])
+      this.broadcast({ type: 'BATCH_UPDATED', batch: bi })
+    }
+    return jsonRes({ ok: true })
+  }
+
+  // ─── Admin: settle batch ──────────────────────────────────────────────────
+
+  private async handleSettleBatch(body: Row): Promise<Response> {
+    const batchId = body.batchId as BatchId
+    const batch = await getBatchById(this.env.DB, batchId)
+    if (!batch) return jsonRes({ error: 'Unknown batch' }, 404)
+    if (batch.status !== 'open') return jsonRes({ error: 'Batch is not open' }, 409)
+
+    const config = await getConfig(this.env.DB)
+    const { Ps: _Ps, Pp, Vs: _Vs, Bp } = {
+      Ps: config.postStake, Pp: config.postPayout,
+      Vs: config.voteStake, Bp: config.backPayout,
+    }
+    const Ps = config.postStake, Vs = config.voteStake
+
+    const submissionRows = await getSubmissionsForBatch(this.env.DB, batchId)
+    const voteRows = await this.env.DB
+      .prepare('SELECT submission_id, voter_team_id, vote_type, stake FROM votes WHERE batch_id = ?')
+      .bind(batchId).all<{ submission_id: string; voter_team_id: string; vote_type: string; stake: number }>()
+
+    const stmts: import('@cloudflare/workers-types').D1PreparedStatement[] = []
+    const walletDeltas = new Map<string, number>()
+    const addDelta = (teamId: string, delta: number) =>
+      walletDeltas.set(teamId, (walletDeltas.get(teamId) ?? 0) + delta)
+    const now = Date.now()
+
+    const pay = (teamId: string, delta: number, type: string, note: string, puzzleId: string) => {
+      if (delta === 0) return
+      addDelta(teamId, delta)
+      stmts.push(
+        this.env.DB.prepare(
+          'INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        ).bind(crypto.randomUUID(), teamId, batchId, puzzleId, type, delta, note, now),
+      )
+    }
+
+    const results: BatchSummary['results'] = {}
+
+    const puzzleIds = [...new Set(submissionRows.map((s) => s.puzzle_id))]
+    for (const puzzleId of puzzleIds) {
+      const puzzle      = PUZZLE_MAP.get(puzzleId)
+      const imagePuzzle = IMAGE_PUZZLE_MAP.get(puzzleId)
+      if (!puzzle && !imagePuzzle) continue
+      const puzzleSubs = submissionRows.filter((s) => s.puzzle_id === puzzleId)
+      results[puzzleId] = []
+
+      for (const row of puzzleSubs) {
+        // Judge: numerical formula or image filter list?
+        let verdict: Verdict, r2: number, accuracy: number
+        if (imagePuzzle) {
+          let submitted: string[]
+          try { submitted = JSON.parse(row.expr) } catch { submitted = [] }
+          const correct = imagePuzzle.correctPipeline
+          const isRight = imagePuzzle.isCommutative
+            ? JSON.stringify([...submitted].sort()) === JSON.stringify([...correct].sort())
+            : JSON.stringify(submitted) === JSON.stringify(correct)
+          verdict  = isRight ? 'right' : 'wrong'
+          r2       = isRight ? 1 : 0
+          accuracy = isRight ? 1 : 0
+        } else {
+          ;({ verdict, r2, accuracy } = judge(row.expr, puzzle!.X, puzzle!.y, puzzle!.solution))
+        }
+        const votes = voteRows.results.filter((v) => v.submission_id === row.id)
+        const backers  = votes.filter((v) => v.vote_type === 'up')
+        const doubters = votes.filter((v) => v.vote_type === 'down')
+
+        stmts.push(
+          this.env.DB.prepare('UPDATE submissions SET r2_score = ?, verdict = ? WHERE id = ?')
+            .bind(r2, verdict, row.id),
+        )
+
+        if (verdict === 'right') {
+          pay(row.team_id, Ps + Pp, 'post_win', 'Formula correct: stake back + payout', puzzleId)
+          pay(row.team_id, Vs * doubters.length, 'post_doubter_income', 'Collected stakes from doubters', puzzleId)
+          stmts.push(
+            this.env.DB.prepare('UPDATE teams SET total_score = total_score + 1 WHERE id = ?').bind(row.team_id),
+          )
+          for (const v of backers) pay(v.voter_team_id, Vs + Bp, 'back_win', 'Backed a correct formula', puzzleId)
+        } else if (verdict === 'close') {
+          pay(row.team_id, Ps + Math.round(Pp / 2), 'post_close', 'Right shape, wrong numbers: stake back + half payout', puzzleId)
+          for (const v of backers) pay(v.voter_team_id, Vs + Math.round(Bp / 2), 'back_close', 'Backed a close formula', puzzleId)
+          for (const v of doubters) pay(v.voter_team_id, Vs, 'doubt_refund', 'Doubted a close formula: stake refunded', puzzleId)
+        } else {
+          pay(row.team_id, -(Vs * doubters.length), 'post_doubter_payout', 'Paid doubters for wrong formula', puzzleId)
+          for (const v of doubters) pay(v.voter_team_id, 2 * Vs, 'doubt_win', 'Called out a wrong formula', puzzleId)
+        }
+
+        results[puzzleId].push({
+          submissionId: row.id,
+          teamId:       row.team_id,
+          label:        row.team_name,
+          expr:         row.expr,
+          accuracy,
+          verdict,
+          ups:          row.ups ?? 0,
+          downs:        row.downs ?? 0,
+        })
+      }
+    }
+
+    // Apply wallet deltas
+    for (const [teamId, delta] of walletDeltas) {
+      stmts.push(
+        this.env.DB.prepare('UPDATE teams SET wallet = wallet + ? WHERE id = ?').bind(delta, teamId),
+      )
+    }
+
+    stmts.push(
+      this.env.DB.prepare("UPDATE batches SET status='settled', submissions_open=0, voting_open=0, settled_at=? WHERE id=?")
+        .bind(now, batchId),
+    )
+
+    // Run all in one batch
+    for (let i = 0; i < stmts.length; i += 80) {
+      await this.env.DB.batch(stmts.slice(i, i + 80))
+    }
+
+    const [teams, solutions] = await Promise.all([
+      getAllTeams(this.env.DB),
+      Promise.resolve(Object.fromEntries(puzzleIds.map((id) => [id, PUZZLE_MAP.get(id)?.solution ?? '']))),
+    ])
+
+    // wallet deltas for summary
+    const teamMap = new Map(teams.map((t) => [t.id, t]))
+    const deltas = [...walletDeltas.entries()]
+      .filter(([, d]) => d !== 0)
+      .map(([teamId, delta]) => ({
+        teamId,
+        teamName:   teamMap.get(teamId)?.name ?? teamId,
+        delta,
+        newBalance: teamMap.get(teamId)?.wallet ?? 0,
+      }))
+
+    const summary: BatchSummary = { batchId, results, deltas, solutions }
+    this.broadcast({ type: 'BATCH_SETTLED', batchId, summary, teams })
+
+    return jsonRes({ ok: true })
+  }
+
+  // ─── Admin: reopen batch (undo settlement) ────────────────────────────────
+
+  private async handleReopenBatch(body: Row): Promise<Response> {
+    const batchId = body.batchId as BatchId
+    const batch = await getBatchById(this.env.DB, batchId)
+    if (!batch) return jsonRes({ error: 'Unknown batch' }, 404)
+    if (batch.status !== 'settled') return jsonRes({ error: 'Batch is not settled' }, 409)
+
+    const SETTLEMENT_TYPES = ['post_win','post_close','post_doubter_income','back_win','back_close','doubt_refund','post_doubter_payout','doubt_win']
+    const placeholders = SETTLEMENT_TYPES.map(() => '?').join(',')
+
+    // Sum settlement deltas per team
+    const deltaRows = await this.env.DB
+      .prepare(`SELECT team_id, SUM(delta) as net FROM wallet_transactions WHERE batch_id = ? AND type IN (${placeholders}) GROUP BY team_id`)
+      .bind(batchId, ...SETTLEMENT_TYPES).all<{ team_id: string; net: number }>()
+
+    const stmts: import('@cloudflare/workers-types').D1PreparedStatement[] = []
+
+    // Reverse wallet changes
+    for (const { team_id, net } of deltaRows.results) {
+      if (net !== 0) {
+        stmts.push(
+          this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?').bind(net, team_id),
+        )
+      }
+    }
+
+    // Decrement total_score for right submissions in this batch
+    const rightSubs = await this.env.DB
+      .prepare("SELECT DISTINCT team_id FROM submissions WHERE batch_id = ? AND verdict = 'right'")
+      .bind(batchId).all<{ team_id: string }>()
+    for (const { team_id } of rightSubs.results) {
+      stmts.push(
+        this.env.DB.prepare('UPDATE teams SET total_score = MAX(0, total_score - 1) WHERE id = ?').bind(team_id),
+      )
+    }
+
+    // Delete settlement transactions
+    stmts.push(
+      this.env.DB.prepare(`DELETE FROM wallet_transactions WHERE batch_id = ? AND type IN (${placeholders})`)
+        .bind(batchId, ...SETTLEMENT_TYPES),
+    )
+
+    // Clear verdict on submissions
+    stmts.push(
+      this.env.DB.prepare('UPDATE submissions SET r2_score = NULL, verdict = NULL WHERE batch_id = ?').bind(batchId),
+    )
+
+    // Reopen the batch
+    stmts.push(
+      this.env.DB.prepare("UPDATE batches SET status='open', submissions_open=1, voting_open=1, settled_at=NULL WHERE id=?")
+        .bind(batchId),
+    )
+
+    for (let i = 0; i < stmts.length; i += 80) {
+      await this.env.DB.batch(stmts.slice(i, i + 80))
+    }
+
+    const teams = await getAllTeams(this.env.DB)
+    this.broadcast({ type: 'BATCH_REOPENED', batchId, teams })
+
     return jsonRes({ ok: true })
   }
 
   // ─── Admin: end game ──────────────────────────────────────────────────────
 
-  private async handleEndGame(roomId: string): Promise<Response> {
-    await this.endGame(roomId)
+  private async handleEndGame(): Promise<Response> {
+    // Settle any open batches first
+    const openBatches = await this.env.DB
+      .prepare("SELECT id FROM batches WHERE status = 'open'")
+      .all<{ id: string }>()
+    for (const { id } of openBatches.results) {
+      await this.handleSettleBatch({ batchId: id })
+    }
+
+    await this.env.DB.prepare("UPDATE game_config SET status = 'finished' WHERE id = 1").run()
+
+    const rows = await this.env.DB
+      .prepare('SELECT id, name, wallet, total_score FROM teams ORDER BY wallet DESC, total_score DESC')
+      .all<{ id: string; name: string; wallet: number; total_score: number }>()
+
+    const leaderboard: LeaderboardEntry[] = rows.results.map((r, i) => ({
+      rank:       i + 1,
+      teamId:     r.id,
+      teamName:   r.name,
+      wallet:     r.wallet,
+      totalScore: r.total_score,
+    }))
+
+    this.broadcast({ type: 'GAME_ENDED', leaderboard })
     return jsonRes({ ok: true })
   }
 
-  private async endGame(roomId: string) {
-    const round = await getCurrentRound(this.env.DB, roomId)
-    // Settle a live round before closing so no stakes are left hanging
-    if (round?.phase === 'submission') await this.transitionToResults(roomId, round, false)
-    if (round) {
-      await this.env.DB
-        .prepare('UPDATE rounds SET ended_at = ? WHERE id = ?')
-        .bind(Date.now(), round.id).run()
-    }
+  // ─── Admin: reset game ────────────────────────────────────────────────────
 
-    await this.env.DB
-      .prepare('UPDATE rooms SET status = ? WHERE id = ?')
-      .bind('finished', roomId).run()
-
-    const leaderboard = await this.buildLeaderboard(roomId)
-    this.broadcast({ type: 'GAME_ENDED', leaderboard })
-  }
-
-  // ─── Admin: delete room ───────────────────────────────────────────────────
-
-  private async handleDeleteRoom(roomId: string): Promise<Response> {
-    const room = await getRoomById(this.env.DB, roomId)
-    if (!room) return jsonRes({ error: 'Room not found' }, 404)
-
-    const inRoom = (table: string, col: string, via: 'rounds' | 'players') =>
-      this.env.DB
-        .prepare(`DELETE FROM ${table} WHERE ${col} IN (SELECT id FROM ${via} WHERE room_id = ?)`)
-        .bind(roomId)
-
-    // Children first so foreign keys never point at deleted rows
+  private async handleReset(): Promise<Response> {
     await this.env.DB.batch([
-      inRoom('votes', 'round_id', 'rounds'),
-      inRoom('submissions', 'round_id', 'rounds'),
-      inRoom('round_players', 'round_id', 'rounds'),
-      inRoom('wallet_transactions', 'player_id', 'players'),
-      this.env.DB.prepare('DELETE FROM rounds WHERE room_id = ?').bind(roomId),
-      this.env.DB.prepare('DELETE FROM players WHERE room_id = ?').bind(roomId),
-      this.env.DB.prepare('DELETE FROM rooms WHERE id = ?').bind(roomId),
+      this.env.DB.prepare('DELETE FROM wallet_transactions'),
+      this.env.DB.prepare('DELETE FROM votes'),
+      this.env.DB.prepare('DELETE FROM submissions'),
+      this.env.DB.prepare('DELETE FROM team_members'),
+      this.env.DB.prepare('DELETE FROM teams'),
+      this.env.DB.prepare("UPDATE batches SET status='hidden', submissions_open=1, voting_open=1, opened_at=NULL, settled_at=NULL"),
+      this.env.DB.prepare("UPDATE game_config SET status='lobby' WHERE id=1"),
     ])
 
-    // Kick everyone out and wipe this object's own storage (stored roomId, alarm)
-    this.broadcast({ type: 'ROOM_DELETED' })
-    for (const ws of this.connections.values()) {
-      try { ws.close(4004, 'Room deleted') } catch { /* already closed */ }
+    this.broadcast({ type: 'GAME_RESET' })
+    for (const sockets of this.connections.values()) {
+      for (const ws of sockets) {
+        try { ws.close(4000, 'Game reset') } catch { /* already closed */ }
+      }
     }
     this.connections.clear()
-    await this.ctx.storage.deleteAlarm()
-    await this.ctx.storage.deleteAll()
-
-    return jsonRes({ ok: true })
-  }
-
-  // ─── Admin: reset a player's login ────────────────────────────────────────
-
-  private async handleResetLogin(roomId: string, body: Record<string, unknown>): Promise<Response> {
-    const playerId = typeof body.playerId === 'string' ? body.playerId : ''
-    const res = await this.env.DB
-      .prepare('UPDATE players SET token = NULL WHERE id = ? AND room_id = ?')
-      .bind(playerId, roomId).run()
-    if (res.meta.changes !== 1) return jsonRes({ error: 'Player not found in this room' }, 404)
-
-    // 4001 tells the client its session is gone, so it stops reconnecting
-    const ws = this.connections.get(playerId)
-    if (ws) {
-      this.connections.delete(playerId)
-      try { ws.close(4001, 'Login reset by host') } catch { /* already closed */ }
-      await this.onPlayerDisconnect(playerId)
-    }
-
     return jsonRes({ ok: true })
   }
 
   // ─── Admin: update config ─────────────────────────────────────────────────
 
-  private async handleUpdateConfig(roomId: string, body: Record<string, unknown>): Promise<Response> {
-    const round = await getCurrentRound(this.env.DB, roomId)
-    if (round && round.phase === 'submission') {
-      return jsonRes({ error: 'Cannot change settings while a round is live' }, 409)
-    }
-
-    const allowed = [
-      'phase1_secs', 'poster_reward', 'post_payout', 'voter_reward', 'back_payout', 'hint_cost',
-      'votes_per_round', 'anonymous_voting', 'max_rounds', 'starting_wallet',
-    ]
-
-    // Backing a right answer must always pay more than posting it
-    const room = await getRoomById(this.env.DB, roomId)
-    if (!room) return jsonRes({ error: 'Room not found' }, 404)
-    const postPayout = Number(body.post_payout ?? room.config.postPayout)
-    const backPayout = Number(body.back_payout ?? room.config.backPayout)
-    if (!(backPayout > postPayout)) {
-      return jsonRes({ error: 'The back payout must be bigger than the post payout' }, 400)
-    }
+  private async handleUpdateConfig(body: Row): Promise<Response> {
+    const allowed = ['starting_wallet','post_stake','post_payout','vote_stake','back_payout','hint_cost','vote_budget','anonymous_voting']
     const sets: string[] = []
     const vals: unknown[] = []
 
     for (const key of allowed) {
-      if (body[key] !== undefined) {
-        sets.push(`${key} = ?`)
-        vals.push(body[key])
-      }
+      if (body[key] !== undefined) { sets.push(`${key} = ?`); vals.push(body[key]) }
+    }
+    if (sets.length === 0) return jsonRes({ error: 'Nothing to update' }, 400)
+
+    const cfg = await getConfig(this.env.DB)
+    const postPayout = Number(body.post_payout ?? cfg.postPayout)
+    const backPayout = Number(body.back_payout ?? cfg.backPayout)
+    if (!(backPayout > postPayout)) {
+      return jsonRes({ error: 'back_payout must be greater than post_payout' }, 400)
     }
 
-    if (sets.length === 0) return jsonRes({ error: 'Nothing to update' }, 400)
-    vals.push(roomId)
+    vals.push(1)
+    await this.env.DB.prepare(`UPDATE game_config SET ${sets.join(', ')} WHERE id = ?`).bind(...vals).run()
+    return jsonRes({ ok: true })
+  }
 
-    await this.env.DB
-      .prepare(`UPDATE rooms SET ${sets.join(', ')} WHERE id = ?`)
-      .bind(...vals).run()
+  // ─── Admin: remove team ───────────────────────────────────────────────────
+
+  private async handleRemoveTeam(body: Row): Promise<Response> {
+    const { teamId } = body as { teamId: string }
+    // CASCADE deletes members, submissions, votes, transactions
+    await this.env.DB.prepare('DELETE FROM teams WHERE id = ?').bind(teamId).run()
+
+    // Kick their sockets
+    const sockets = this.connections.get(teamId)
+    if (sockets) {
+      for (const ws of sockets) {
+        try { ws.close(4001, 'Team removed') } catch { /* already closed */ }
+      }
+      this.connections.delete(teamId)
+    }
+
+    const teams = await getAllTeams(this.env.DB)
+    // Broadcast updated team list via FULL_STATE to each connected team
+    for (const [tid, socketSet] of this.connections) {
+      const state = await this.buildGameState(tid)
+      const msg = JSON.stringify({ type: 'FULL_STATE', state } satisfies ServerMessage)
+      for (const ws of socketSet) {
+        try { ws.send(msg) } catch { /* ignore */ }
+      }
+    }
 
     return jsonRes({ ok: true })
   }
 
-  // ─── Get state (for admin full view) ─────────────────────────────────────
+  // ─── Broadcast helpers ────────────────────────────────────────────────────
 
-  private async handleGetState(roomId: string): Promise<Response> {
-    const state = await this.buildRoomState(roomId)
-    return jsonRes(state)
-  }
-
-  // ─── Round settlement ─────────────────────────────────────────────────────
-
-  private async transitionToResults(roomId: string, round: Round, allowAutoEnd = true) {
-    await this.ctx.storage.deleteAlarm()
-
-    const puzzle = PUZZLE_MAP.get(round.puzzleId)
-    const room = await getRoomById(this.env.DB, roomId)
-    if (!puzzle || !room) return
-
-    const { postStake: Ps, postPayout: Pp, voteStake: Vs, backPayout: Bp } = room.config
-    const now = Date.now()
-
-    const [submissionRows, voteRows] = await Promise.all([
-      getSubmissionsForRound(this.env.DB, round.id),
-      this.env.DB
-        .prepare('SELECT submission_id, voter_id, vote_type FROM votes WHERE round_id = ?')
-        .bind(round.id)
-        .all<{ submission_id: string; voter_id: string; vote_type: VoteType }>(),
-    ])
-
-    const stmts: D1PreparedStatement[] = []
-    const pay = (playerId: string, delta: number, type: string, note: string) => {
-      if (delta !== 0) stmts.push(...this.walletStmts(playerId, round.id, delta, type, note, now))
-    }
-
-    for (const row of submissionRows) {
-      const { verdict, r2 } = judge(row.features_json, puzzle.X, puzzle.y, puzzle.solution)
-      const votes = voteRows.results.filter((v) => v.submission_id === row.id)
-      const backers = votes.filter((v) => v.vote_type === 'up')
-      const doubters = votes.filter((v) => v.vote_type === 'down')
-
-      stmts.push(
-        this.env.DB
-          .prepare('UPDATE submissions SET r2_score = ?, is_correct = ? WHERE id = ?')
-          .bind(r2, verdict === 'right' ? 1 : 0, row.id),
-      )
-
-      if (verdict === 'right') {
-        pay(row.player_id, Ps + Pp, 'post_win', 'Your formula was right: stake back plus payout')
-        pay(row.player_id, Vs * doubters.length, 'post_doubter_income', 'Collected stakes from players who doubted you')
-        stmts.push(
-          this.env.DB
-            .prepare('UPDATE players SET total_score = total_score + 1 WHERE id = ?')
-            .bind(row.player_id),
-        )
-        for (const v of backers) pay(v.voter_id, Vs + Bp, 'back_win', 'Backed a right formula')
-        // doubters' stakes were collected above and paid to the poster
-      } else if (verdict === 'close') {
-        pay(row.player_id, Ps + Math.round(Pp / 2), 'post_close', 'Right shape, wrong numbers: stake back plus half payout')
-        for (const v of backers) pay(v.voter_id, Vs + Math.round(Bp / 2), 'back_close', 'Backed a nearly-right formula')
-        for (const v of doubters) pay(v.voter_id, Vs, 'doubt_refund', 'Doubted a nearly-right formula: stake refunded')
-      } else {
-        // Poster's stake is kept by the bank; each doubter is paid by the poster
-        pay(row.player_id, -Vs * doubters.length, 'post_doubter_payout', 'Paid players who called out your wrong formula')
-        for (const v of doubters) pay(v.voter_id, 2 * Vs, 'doubt_win', 'Called out a wrong formula')
-        // backers' stakes stay with the bank
-      }
-    }
-
-    stmts.push(
-      this.env.DB
-        .prepare('UPDATE rounds SET phase = ?, phase_ends_at = NULL WHERE id = ?')
-        .bind('results', round.id),
-    )
-
-    await this.env.DB.batch(stmts)
-
-    const settledRound: Round = { ...round, phase: 'results', phaseEndsAt: null }
-    const [summary, players] = await Promise.all([
-      this.buildSummary(room, settledRound),
-      getPlayersByRoom(this.env.DB, roomId),
-    ])
-    this.broadcast({ type: 'ROUND_RESULTS', summary, players })
-
-    if (allowAutoEnd && room.config.maxRounds) {
-      const completed = await this.env.DB
-        .prepare('SELECT COUNT(*) as cnt FROM rounds WHERE room_id = ? AND ended_at IS NOT NULL')
-        .bind(roomId).first<{ cnt: number }>()
-      // +1 because the current round isn't ended yet
-      if ((completed?.cnt ?? 0) + 1 >= room.config.maxRounds) await this.endGame(roomId)
-    }
-  }
-
-  /** Results of a settled round, rebuilt from the DB so reconnecting clients see them too. */
-  private async buildSummary(room: Room, round: Round): Promise<RoundSummary> {
-    const puzzle = PUZZLE_MAP.get(round.puzzleId)
-    const [rows, voteCounts, players, deltaRows] = await Promise.all([
-      getSubmissionsForRound(this.env.DB, round.id),
-      getVoteCountsForRound(this.env.DB, round.id),
-      getPlayersByRoom(this.env.DB, room.id),
-      this.env.DB
-        .prepare('SELECT player_id, SUM(delta) as delta FROM wallet_transactions WHERE round_id = ? GROUP BY player_id')
-        .bind(round.id)
-        .all<{ player_id: string; delta: number }>(),
-    ])
-
-    const subs = buildPublicSubmissions(rows, room.config.anonymousVoting)
-    const results: RoundResult[] = subs.map((sub) => {
-      const counts = voteCounts.find((v) => v.submissionId === sub.id)
-      const judgement = puzzle
-        ? judge(sub.expr, puzzle.X, puzzle.y, puzzle.solution)
-        : { verdict: 'wrong' as const, accuracy: 0 }
-      return {
-        submissionId: sub.id,
-        playerId:     sub.playerId,
-        label:        sub.label,
-        expr:         sub.expr,
-        accuracy:     judgement.accuracy,
-        verdict:      judgement.verdict,
-        ups:          counts?.ups ?? 0,
-        downs:        counts?.downs ?? 0,
-      }
-    })
-
-    const playerMap = new Map(players.map((p) => [p.id, p]))
-    const deltas: WalletDelta[] = deltaRows.results.flatMap((r) => {
-      const p = playerMap.get(r.player_id)
-      return p ? [{ playerId: p.id, username: p.username, delta: r.delta, newBalance: p.wallet }] : []
-    })
-
-    return { results, deltas, solution: puzzle?.solution ?? '' }
-  }
-
-  private async closeRound(round: Round) {
-    await this.env.DB
-      .prepare('UPDATE rounds SET ended_at = ? WHERE id = ?')
-      .bind(Date.now(), round.id).run()
-    this.broadcast({ type: 'PHASE_CHANGED', phase: 'lobby', endsAt: null })
-  }
-
-  // ─── Helpers ──────────────────────────────────────────────────────────────
-
-  /** Wallet update + audit-log row, for inclusion in a batch. */
-  private walletStmts(
-    playerId: string, roundId: string, delta: number, type: string, note: string, now: number,
-  ): D1PreparedStatement[] {
-    return [
-      this.env.DB
-        .prepare('UPDATE players SET wallet = wallet + ? WHERE id = ?')
-        .bind(delta, playerId),
-      this.env.DB
-        .prepare(`INSERT INTO wallet_transactions (id, player_id, round_id, type, delta, note, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .bind(crypto.randomUUID(), playerId, roundId, type, delta, note, now),
-    ]
-  }
-
-  private async broadcastPlayer(playerId: string) {
-    const player = await getPlayerById(this.env.DB, playerId)
-    if (player) this.broadcast({ type: 'PLAYER_UPDATED', player })
-  }
-
-  private async buildLeaderboard(roomId: string): Promise<LeaderboardEntry[]> {
-    const players = await getPlayersByRoom(this.env.DB, roomId)
-    return players
-      .sort((a, b) => b.wallet - a.wallet || b.totalScore - a.totalScore)
-      .map((p, idx) => ({
-        rank:       idx + 1,
-        playerId:   p.id,
-        username:   p.username,
-        wallet:     p.wallet,
-        totalScore: p.totalScore,
-      }))
-  }
-
-  private broadcast(message: ServerMessage, excludePlayerId?: string) {
+  private broadcast(message: ServerMessage) {
     const data = JSON.stringify(message)
-    for (const [pid, ws] of this.connections) {
-      if (pid === excludePlayerId) continue
-      try {
-        ws.send(data)
-      } catch {
-        this.connections.delete(pid)
+    for (const sockets of this.connections.values()) {
+      for (const ws of sockets) {
+        try { ws.send(data) } catch { /* closed */ }
+      }
+    }
+  }
+
+  private broadcastExcept(message: ServerMessage, excludeTeamIds: Set<string>) {
+    const data = JSON.stringify(message)
+    for (const [teamId, sockets] of this.connections) {
+      if (excludeTeamIds.has(teamId)) continue
+      for (const ws of sockets) {
+        try { ws.send(data) } catch { /* closed */ }
       }
     }
   }

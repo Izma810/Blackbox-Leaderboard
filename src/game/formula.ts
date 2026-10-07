@@ -26,6 +26,61 @@ export const TOLERANCE = 0.02
  */
 export const DUPLICATE_TOLERANCE = TOLERANCE
 
+/**
+ * Pearson |r| threshold above which two predictions are treated as duplicates.
+ *
+ * Why Pearson in addition to distance?
+ *   normalisedDistance catches near-identical raw values but misses *scaled*
+ *   duplicates: sin(x) vs 2·sin(x) have large distance yet linear regression
+ *   scores them identically (it absorbs the 2 automatically).
+ *   Pearson is invariant to both scale and shift, so it catches those cases.
+ *
+ * 0.995 lets clearly different functions through (x² vs x³ on [1,10] ≈ 0.987)
+ * while blocking algebraically equivalent ones (sin(x) vs any·sin(x) + c = 1.0).
+ */
+export const DUPLICATE_PEARSON_THRESHOLD = 0.995
+
+/**
+ * Absolute Pearson correlation between two prediction vectors.
+ * Returns a value in [0, 1]. Mean-centred, so scale- and shift-invariant.
+ */
+export function pearsonCorrelation(a: number[], b: number[]): number {
+  const n = a.length
+  if (n === 0) return 0
+
+  let sumA = 0, sumB = 0
+  for (let i = 0; i < n; i++) { sumA += a[i]; sumB += b[i] }
+  const meanA = sumA / n
+  const meanB = sumB / n
+
+  let num = 0, varA = 0, varB = 0
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - meanA
+    const db = b[i] - meanB
+    num  += da * db
+    varA += da * da
+    varB += db * db
+  }
+
+  const denom = Math.sqrt(varA * varB)
+  if (denom < 1e-12) return 1   // both constant vectors — identical shape
+  return Math.abs(num / denom)
+}
+
+/**
+ * Returns true when two prediction vectors are too similar to count as distinct
+ * submissions. Uses both checks so neither scaled nor raw duplicates slip through:
+ *
+ *   • distance check — catches near-identical raw predictions (e.g. x² ≈ x² + ε)
+ *   • Pearson check  — catches scaled/shifted equivalents  (e.g. sin(x) ≈ 2·sin(x))
+ */
+export function isDuplicatePrediction(a: number[], b: number[], y: number[]): boolean {
+  return (
+    normalisedDistance(a, b, y) < DUPLICATE_TOLERANCE ||
+    pearsonCorrelation(a, b)    > DUPLICATE_PEARSON_THRESHOLD
+  )
+}
+
 export type Verdict = 'right' | 'close' | 'wrong'
 
 export interface Judgement {

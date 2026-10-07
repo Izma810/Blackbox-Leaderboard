@@ -1,552 +1,184 @@
-import type { PuzzleData } from '../types'
+import type { PuzzleData, BatchId } from '../types'
 
-// ─── Seeded PRNG (Mulberry32) ─────────────────────────────────────────────────
-// Deterministic, fast, good statistical properties.
-function mulberry32(seed: number): () => number {
-  let s = seed >>> 0
-  return () => {
-    s = (s + 0x6D2B79F5) >>> 0
-    let t = Math.imul(s ^ (s >>> 15), 1 | s)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+export type { BatchId }
+
+export const BATCH_FOR_DIFFICULTY: Record<1 | 2, BatchId> = {
+  1: 'easy',
+  2: 'intermediate',
+}
+
+export const BATCH_NAMES: Record<BatchId, string> = {
+  easy:         'Beginner',
+  intermediate: 'Physics',
+  image:        'Image Processing',
+}
+
+// Pre-computed datasets generated from the Python CLI (seed=42, NumPy PCG64).
+// These must match the CLI exactly so submissions are judged on the same data.
+export const PUZZLES: PuzzleData[] = [
+  {
+    puzzleType: 'numerical' as const,
+    id: "line_01",
+    title: "Straight Talk",
+    description: "",
+    difficulty: 1 as 1 | 2 | 3,
+    batchId: "easy" as BatchId,
+    columns: ["x"],
+    X: {"x":[2.7396,-0.6112,3.586,1.9737,-4.0582,4.7562,2.6114,2.8606,-3.7189,-0.4961,-1.292,4.2676,1.4387,3.2276,-0.5659,-2.7276,0.5458,-4.3618,3.2763,1.3166,2.5809,-1.4547,4.707,3.9312,2.7838]},
+    y: [23.218681,13.166353,25.757938,20.921041,2.82532,29.268671,22.834191,23.581929,3.843409,13.511578,11.123941,27.80295,19.315954,24.682848,13.302426,6.817162,16.637544,1.914518,24.828935,18.949932,22.742632,10.635779,29.120941,26.793634,23.351505],
+    solution: "3x + 15",
+    hints: ["y changes at the same rate as x", "y divided by x is the same on every row"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "line_02",
+    title: "Against the Grain",
+    description: "",
+    difficulty: 1 as 1 | 2 | 3,
+    batchId: "easy" as BatchId,
+    columns: ["x"],
+    X: {"x":[2.7396,-0.6112,3.586,1.9737,-4.0582,4.7562,2.6114,2.8606,-3.7189,-0.4961,-1.292,4.2676,1.4387,3.2276,-0.5659,-2.7276,0.5458,-4.3618,3.2763,1.3166,2.5809,-1.4547,4.707,3.9312,2.7838]},
+    y: [14.520879,21.222431,12.828042,16.052639,28.116453,10.487553,14.777206,14.278714,27.437727,20.992281,22.58404,11.4647,17.122698,13.544768,21.131716,25.455226,18.908304,28.723655,13.447377,17.366712,14.838245,22.909481,10.58604,12.137578,14.43233],
+    solution: "-2x + 20",
+    hints: ["When x increases, y decreases", "y divided by x is negative and constant"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "square_01",
+    title: "The Bend",
+    description: "",
+    difficulty: 1 as 1 | 2 | 3,
+    batchId: "easy" as BatchId,
+    columns: ["x"],
+    X: {"x":[2.7396,-0.6112,3.586,1.9737,-4.0582,4.7562,2.6114,2.8606,-3.7189,-0.4961,-1.292,4.2676,1.4387,3.2276,-0.5659,-2.7276,0.5458,-4.3618,3.2763,1.3166,2.5809,-1.4547,4.707,3.9312,2.7838]},
+    y: [7.505192,0.373585,12.859247,3.895414,16.469202,22.621662,6.819394,8.183279,13.829947,0.246156,1.669315,18.212836,2.069717,10.417506,0.320195,7.439871,0.29795,19.025539,10.734218,1.733551,6.660928,2.116269,22.155663,15.454422,7.749737],
+    solution: "x^2",
+    hints: ["Doubling x more than doubles y", "Doubling x multiplies y by 4"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "sqrt_01",
+    title: "Fading Returns",
+    description: "",
+    difficulty: 1 as 1 | 2 | 3,
+    batchId: "easy" as BatchId,
+    columns: ["x"],
+    X: {"x":[19.4619,11.2525,21.5356,17.5855,2.8073,24.4027,19.1479,19.7586,3.6388,11.5345,9.5846,23.2057,16.2747,20.6577,11.3636,6.0673,14.0873,2.0635,20.777,15.9758,19.0731,9.1859,24.2821,22.3815,19.5704]},
+    y: [8.823134,6.708956,9.281304,8.387018,3.351027,9.879827,8.751668,8.890124,3.815119,6.792483,6.191785,9.634468,8.068382,9.09014,6.742002,4.926398,7.506618,2.872993,9.116351,7.993942,8.734563,6.061645,9.855374,9.461811,8.847688],
+    solution: "2sqrt(x)",
+    hints: ["y grows slower as x grows", "Multiplying x by 4 only doubles y"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "log_01",
+    title: "Compressed",
+    description: "",
+    difficulty: 1 as 1 | 2 | 3,
+    batchId: "easy" as BatchId,
+    columns: ["x"],
+    X: {"x":[77.6216,44.449,86.0012,70.0394,10.3236,97.5866,76.3528,78.8204,13.6832,45.5882,37.709,92.7497,64.7426,82.4534,44.898,23.4966,55.9039,7.3179,82.9355,63.5348,76.0507,36.0981,97.0991,89.419,78.06]},
+    y: [14.055539,12.383025,14.363084,13.747175,8.003285,14.742221,14.006095,14.101514,8.848517,12.458947,11.889697,14.589714,13.51126,14.2367,12.41318,10.470571,13.070902,6.970974,14.254189,13.454762,13.9942,11.758718,14.727196,14.479999,14.072432],
+    solution: "3ln(x) + 1",
+    hints: ["Huge changes in x barely move y", "Every time x is multiplied by 10, y increases by the same amount"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "line_sin_01",
+    title: "The Wobble",
+    description: "",
+    difficulty: 1 as 1 | 2 | 3,
+    batchId: "easy" as BatchId,
+    columns: ["x"],
+    X: {"x":[5.4791,-1.2224,7.172,3.9474,-8.1165,9.5124,5.2228,5.7213,-7.4377,-0.9923,-2.584,8.5353,2.8773,6.4552,-1.1317,-5.4552,1.0917,-8.7237,6.5526,2.6333,5.1618,-2.9095,9.414,7.8624,5.5677]},
+    y: [4.038757,-3.102295,8.724556,2.504635,-10.047956,9.337333,3.477701,4.655697,-9.266947,-2.666832,-3.642263,10.088786,3.399751,6.797631,-2.942002,-3.98212,2.866516,-10.013807,7.085003,3.606682,3.360309,-3.369547,9.435595,9.862351,4.255657],
+    solution: "x + 2sin(x)",
+    hints: ["There is a straight-line trend, but the points wiggle around it", "y - x swings back and forth between roughly -2 and 2"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "projectile_y",
+    title: "Thrown Ball",
+    description: "A ball is thrown from the ground at a fixed speed of 10 m/s, at an angle theta to the horizontal. Record its height above the ground after time t.",
+    difficulty: 2 as 1 | 2 | 3,
+    batchId: "intermediate" as BatchId,
+    columns: ["theta", "t"],
+    X: {"theta":[1.1061,0.6705,1.2162,1.0066,0.2224,1.3683,1.0895,1.1219,0.2665,0.6855,0.582,1.3048,0.937,1.1696,0.6764,0.3954,0.821,0.183,1.1759,0.9212,1.0855,0.5609,1.3619,1.2611,1.1119,0.353,0.7067,0.1569,0.3006,0.988,1.0682,1.3578,0.5236,0.5816,0.7104,0.3463,0.2689,0.7184,0.395,0.9708,0.6683,1.1825,1.0103,0.5061,1.1819,1.1462,0.6037,0.4748,0.9872,0.2817,0.3599,0.1096,1.123,0.9643,1.0167,1.1149,0.6966,0.8394,0.2817,0.2489,0.9689,0.7124,0.8348,1.0945,0.9251,0.8197,0.827,0.4951,0.1401,0.6677,0.379,0.6311,1.2094,0.4041,0.1758,0.4658,0.4817,0.9605,0.8241,1.1191,0.9636,0.6283,1.1582,0.3171,0.1295,0.2171,1.0391,0.7004,0.3097,0.7514,0.298,1.0052,0.68,0.5953,0.492,0.9194,0.5704,0.2139,0.2534,1.3505],"t":[4.5886,3.6487,1.6964,4.8613,4.0044,3.726,2.5221,1.7251,0.9338,4.5617,2.551,1.4106,1.8768,3.1065,1.2955,4.3548,3.9133,3.7376,2.4444,3.3229,3.1284,3.4243,0.88,2.3711,0.6873,2.723,1.9844,1.1504,0.9653,3.1444,1.2677,4.663,3.1148,2.0609,3.1591,0.6026,4.8135,2.6704,4.0223,0.8723,2.69,2.7082,4.7202,3.0728,2.6307,1.7014,1.9921,2.843,2.4751,0.5973,4.2183,4.5327,1.1311,2.9932,0.9886,3.5251,1.7656,3.4674,3.7715,3.9589,0.9848,4.6221,1.536,0.6684,2.9968,2.1692,4.2341,4.1371,1.9271,4.788,1.8091,2.8178,1.6518,4.7122,1.2407,0.7021,2.4579,4.9657,4.5125,3.8687,4.5086,4.5205,2.8349,1.9217,3.9741,3.4775,2.1815,0.9251,3.8606,1.6811,4.7157,1.5844,1.0524,4.24,1.1898,1.3067,3.1972,4.4355,1.384,1.8965]},
+    y: [-62.220182,-42.604081,1.797717,-74.797965,-69.791372,-31.574634,-8.83485,0.949717,-1.815694,-73.155863,-17.885215,3.853141,-2.148166,-18.720364,-0.11912,-76.212536,-46.452736,-61.696856,-6.735194,-27.680163,-20.317124,-39.28079,4.811569,-4.984846,3.845609,-26.941288,-6.422387,-4.690668,-1.711054,-22.227607,3.229403,-61.04136,-31.998017,-9.504392,-28.333036,0.264844,-100.821721,-17.388717,-63.853218,3.468244,-18.811591,-10.896663,-69.267407,-31.401704,-9.59092,1.309313,-8.148755,-26.63471,-9.383408,-0.088902,-72.395279,-95.78505,3.922488,-19.335571,3.614742,-29.278391,-3.956625,-33.147032,-59.259442,-67.097911,3.362034,-74.53856,-0.183788,3.749356,-20.101124,-7.216669,-56.745279,-64.267011,-15.519646,-82.762739,-9.35539,-22.305786,2.072406,-90.348436,-5.378379,0.736329,-18.236534,-80.214062,-66.726304,-38.581868,-62.64388,-73.629174,-13.435317,-12.11588,-72.305761,-51.805959,-4.531088,1.766459,-61.314321,-2.381281,-95.191547,1.068039,1.186744,-64.373195,-1.32099,2.018825,-32.860097,-87.050259,-5.92187,0.871066],
+    solution: "10sin(theta)t - 4.90333t^2",
+    hints: ["This is projectile motion. The height depends on launch angle and time", "y = v0 sin(theta) t - (1/2) g t^2 where v0 = 10 m/s"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "shm_energy",
+    title: "Spring System",
+    description: "A 2 kg mass is on a spring with stiffness 4 N/m. The mass is displaced by x metres and moves with speed v m/s. Record the total mechanical energy.",
+    difficulty: 2 as 1 | 2 | 3,
+    batchId: "intermediate" as BatchId,
+    columns: ["x", "v"],
+    X: {"x":[1.5705,0.9339,1.7313,1.425,0.2789,1.9537,1.5462,1.5935,0.3434,0.9557,0.8045,1.8609,1.3233,1.6632,0.9425,0.5318,1.1537,0.2213,1.6725,1.3002,1.5404,0.7736,1.9443,1.7969,1.5789,0.4698,0.9868,0.1832,0.3932,1.3978,1.515,1.9383,0.7191,0.8039,0.9922,0.46,0.3469,1.0038,0.5311,1.3726,0.9306,1.6821,1.4305,0.6935,1.6813,1.6291,0.8362,0.6478,1.3967,0.3655,0.4798,0.114,1.5952,1.3632,1.4398,1.5834,0.9719,1.1806,0.3656,0.3176,1.37,0.9951,1.1739,1.5535,1.306,1.1518,1.1625,0.6775,0.1586,0.9298,0.5077,0.8762,1.7215,0.5445,0.2108,0.6346,0.6578,1.3576,1.1584,1.5894,1.3622,0.8721,1.6466,0.4172,0.1432,0.2711,1.4725,0.9776,0.4064,1.052,0.3894,1.423,0.9477,0.8239,0.6729,1.2975,0.7874,0.2665,0.3242,1.9276],"v":[4.5886,3.6487,1.6964,4.8613,4.0044,3.726,2.5221,1.7251,0.9338,4.5617,2.551,1.4106,1.8768,3.1065,1.2955,4.3548,3.9133,3.7376,2.4444,3.3229,3.1284,3.4243,0.88,2.3711,0.6873,2.723,1.9844,1.1504,0.9653,3.1444,1.2677,4.663,3.1148,2.0609,3.1591,0.6026,4.8135,2.6704,4.0223,0.8723,2.69,2.7082,4.7202,3.0728,2.6307,1.7014,1.9921,2.843,2.4751,0.5973,4.2183,4.5327,1.1311,2.9932,0.9886,3.5251,1.7656,3.4674,3.7715,3.9589,0.9848,4.6221,1.536,0.6684,2.9968,2.1692,4.2341,4.1371,1.9271,4.788,1.8091,2.8178,1.6518,4.7122,1.2407,0.7021,2.4579,4.9657,4.5125,3.8687,4.5086,4.5205,2.8349,1.9217,3.9741,3.4775,2.1815,0.9251,3.8606,1.6811,4.7157,1.5844,1.0524,4.24,1.1898,1.3067,3.1972,4.4355,1.384,1.8965]},
+    y: [25.988414,15.057104,8.872872,27.693422,16.190663,21.51687,11.142378,8.054551,1.107775,22.636057,7.80206,8.915443,7.024874,15.18305,3.454825,19.529496,17.976312,14.067435,11.56969,14.422441,14.532601,12.922809,8.335208,12.080189,5.458363,7.855954,5.885176,1.39047,1.240964,13.794906,6.197725,29.257717,10.735942,5.539792,11.948785,0.78634,23.410552,9.146239,16.743159,4.529198,8.967889,12.993091,26.373149,10.403829,12.574091,8.202352,5.366796,8.922146,10.027901,0.623937,18.254635,20.571569,6.368482,12.675742,5.123442,17.440409,5.006509,14.810547,14.491377,15.874746,4.72351,23.343756,5.115493,5.273411,12.392115,7.358503,20.629995,18.033885,3.76409,24.654315,3.788493,9.475223,8.655474,22.79772,1.628276,1.29845,6.906929,28.344458,23.046688,20.019546,24.038324,21.956249,13.459284,4.04105,15.834106,12.239818,9.095178,2.767083,15.23422,5.039349,22.540695,6.560128,2.903827,19.335415,2.321091,5.074688,11.462368,19.816001,2.12556,11.027874],
+    solution: "2x^2 + v^2",
+    hints: ["Total mechanical energy of a spring-mass system", "y = (1/2) k x^2 + (1/2) m v^2 with k = 4 and m = 2"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "travelling_wave",
+    title: "Wave Machine",
+    description: "A wave has amplitude 5 m, wavenumber 1 rad/m, angular frequency 1 rad/s and zero phase. Record its displacement at position x metres and time t seconds.",
+    difficulty: 2 as 1 | 2 | 3,
+    batchId: "intermediate" as BatchId,
+    columns: ["x", "t"],
+    X: {"x":[3.8698,2.1944,4.293,3.4868,0.4709,4.8781,3.8057,3.9303,0.6406,2.2519,1.854,4.6338,3.2193,4.1138,2.2171,1.1362,2.7729,0.3191,4.1382,3.1583,3.7904,1.7726,4.8535,4.4656,3.8919,0.9732,2.3336,0.219,0.7714,3.4152,3.7238,4.8375,1.6291,1.8523,2.3478,0.9474,0.6496,2.3785,1.1345,3.3491,2.1858,4.1634,3.5013,1.5618,4.1613,4.0238,1.9374,1.4416,3.4125,0.6988,0.9995,0.0368,3.9346,3.3243,3.5258,3.9036,2.2946,2.8437,0.699,0.5727,3.342,2.3555,2.8262,3.825,3.1736,2.7679,2.796,1.5198,0.1541,2.1836,1.0729,2.0426,4.267,1.1697,0.2915,1.4069,1.468,3.3096,2.7852,3.9195,3.3216,2.0319,4.0701,0.8349,0.1136,0.4502,3.6118,2.3094,0.8064,2.5052,0.7616,3.4816,2.2308,1.9051,1.5076,3.1514,1.8091,0.4382,0.59,4.8095],"t":[4.5429,3.4985,1.3293,4.8459,3.8938,3.5845,2.2468,1.3612,0.482,4.513,2.2789,1.0118,1.5298,2.8961,0.8839,4.2831,3.7926,3.5973,2.1605,3.1365,2.9205,3.2492,0.4222,2.079,0.2081,2.47,1.6493,0.7226,0.517,2.9382,0.853,4.6256,2.9053,1.7343,2.9546,0.114,4.7928,2.4115,3.9137,0.4136,2.4333,2.4535,4.6891,2.8586,2.3674,1.3349,1.6578,2.6034,2.1946,0.1081,4.1315,4.4808,0.7012,2.7702,0.5429,3.3612,1.4062,3.2971,3.635,3.8432,0.5387,4.5801,1.1511,0.1871,2.7743,1.8546,4.1489,4.0413,1.5857,4.7645,1.4546,2.5753,1.2798,4.6802,0.823,0.2246,2.1755,4.9619,4.4584,3.743,4.454,4.4672,2.5943,1.5796,3.8601,3.3083,1.8683,0.4723,3.7339,1.3123,4.6841,1.2049,0.6138,4.1556,0.7664,0.8963,2.9969,4.3728,0.9822,1.5516]},
+    y: [-3.117155,-4.823291,0.885076,-4.888318,1.387904,4.809216,4.999646,2.708587,0.789746,-3.85532,-2.061109,-2.310738,4.96479,4.69155,4.859541,0.026426,-4.259686,0.681055,4.591772,0.10888,3.82148,-4.977836,-4.803726,3.426531,-2.58034,-4.986303,3.16065,-2.412918,1.258482,2.295678,1.337255,1.051824,-4.784567,0.588381,-2.851202,3.700898,4.211661,-0.164933,-1.772893,1.023576,-1.22506,4.951734,-4.637758,-4.813496,4.87613,2.186747,1.379601,-4.587446,4.691913,2.784721,-0.048369,4.820987,-0.458275,2.630778,0.789899,2.581156,3.88035,-2.190155,-1.020795,0.643185,1.659337,-3.968947,4.972821,-2.381047,1.944002,3.95758,-4.881786,-2.905525,-4.951643,-2.658822,-1.862335,-2.539057,0.76895,1.803078,-2.534244,4.627524,-3.249742,-4.983404,-4.973794,0.877684,-4.527157,-3.245093,4.977461,-3.389053,2.843437,-1.398711,4.925612,4.823813,-1.061869,4.647254,3.519639,3.804969,4.994666,-3.888929,3.375642,3.874387,-4.63784,3.562196,-1.910852,-0.580077],
+    solution: "5sin(x - t)",
+    hints: ["A sinusoidal wave. The output depends on position and time together", "y = A sin(kx - omega*t) with A=5, k=1, omega=1"],
+  },
+  {
+    puzzleType: 'numerical' as const,
+    id: "coulomb_2",
+    title: "Two Charges",
+    description: "Two point charges sit on a line: q1 = 2 \u03bcC and q2 = \u22123 \u03bcC. They are r1 and r2 metres from a measuring point. Record the electric potential at that point.",
+    difficulty: 2 as 1 | 2 | 3,
+    batchId: "intermediate" as BatchId,
+    columns: ["r1", "r2"],
+    X: {"r1":[4.0958,2.7555,4.4344,3.7895,1.3767,4.9025,4.0446,4.1443,1.5125,2.8015,2.4832,4.7071,3.5755,4.291,2.7737,1.909,3.2183,1.2553,4.3105,3.5267,4.0324,2.4181,4.8828,4.5725,4.1135,1.7786,2.8669,1.1752,1.6172,3.7322,3.979,4.87,2.3033,2.4818,2.8782,1.7579,1.5197,2.9028,1.9076,3.6793,2.7486,4.3307,3.8011,2.2495,4.329,4.2191,2.5499,2.1533,3.73,1.559,1.7996,1.0294,4.1477,3.6594,3.8207,4.1229,2.8357,3.275,1.5592,1.4581,3.6736,2.8844,3.2609,4.06,3.5389,3.2143,3.2368,2.2158,1.1233,2.7469,1.8583,2.6341,4.4136,1.9358,1.2332,2.1255,2.1744,3.6477,3.2281,4.1356,3.6573,2.6255,4.2561,1.6679,1.0908,1.3602,3.8894,2.8475,1.6451,3.0042,1.6092,3.7853,2.7846,2.5241,2.206,3.5211,2.4473,1.3506,1.472,4.8476],"r2":[4.6343,3.7988,2.0635,4.8767,4.115,3.8676,2.7974,2.089,1.3856,4.6104,2.8231,1.8095,2.2238,3.3169,1.7071,4.4265,4.0341,3.8779,2.7284,3.5092,3.3364,3.5994,1.3378,2.6632,1.1665,2.976,2.3194,1.5781,1.4136,3.3506,1.6824,4.7005,3.3242,2.3875,3.3637,1.0912,4.8342,2.9292,4.1309,1.3309,2.9466,2.9628,4.7513,3.2869,2.894,2.0679,2.3263,3.0827,2.7556,1.0864,4.3052,4.5846,1.561,3.2161,1.4343,3.689,2.1249,3.6377,3.908,4.0746,1.431,4.664,1.9209,1.1497,3.2194,2.4837,4.3192,4.233,2.2686,4.8116,2.1637,3.0602,2.0239,4.7442,1.6584,1.1796,2.7404,4.9695,4.5667,3.9944,4.5632,4.5738,3.0754,2.2637,4.088,3.6466,2.4946,1.3779,3.9872,2.0498,4.7473,1.9639,1.491,4.3245,1.6131,1.7171,3.3975,4.4982,1.7857,2.2413]},
+    y: [-1429.394331,-574.301661,-9013.028015,-785.434764,6504.290884,-3304.962773,-5194.04319,-8569.823875,-7574.975666,567.929789,-2312.000394,-11082.240227,-7097.088549,-3939.946168,-9313.850949,3324.951723,-1098.510562,7366.734565,-5712.273135,-2586.418591,-3623.658448,-57.350144,-16473.499671,-6192.898726,-18745.260407,1046.434407,-5354.706266,-1790.391774,-7958.348633,-3230.937355,-11509.135306,-2045.191932,-306.851651,-4050.701609,-1770.655299,-14483.41527,6250.731523,-3012.450768,2895.703572,-15373.13294,-2610.613596,-4949.699902,-945.817672,-212.205434,-5164.664404,-8778.193462,-4541.180712,-398.818619,-4965.428165,-13287.426369,3725.347866,11579.815702,-12938.966835,-3471.502235,-14093.72824,-2949.208569,-6349.753853,-1923.385327,4629.116186,5710.317793,-13949.271636,450.910764,-8524.553319,-19025.550148,-3295.700794,-5263.69076,-689.263598,1742.615677,4117.074476,940.169982,-2788.856365,-1986.703107,-9249.737931,3602.503036,-1682.07304,-14399.892261,-1572.200216,-497.78799,-335.902604,-2403.620411,-993.837645,951.190577,-4543.714758,-1133.652229,9882.61538,5821.302671,-6186.756721,-13255.835195,4164.1623,-7170.162028,5490.241397,-8980.578936,-11628.095222,886.501952,-8566.320544,-10597.758071,-590.935216,7314.944969,-2887.729196,-8321.897588],
+    solution: "17975.1/r1 - 26962.7/r2",
+    hints: ["Electric potential from two point charges. It involves 1/r1 and 1/r2", "y = ke*(q1/r1 + q2/r2) with ke=8.99e9, q1=2e-6, q2=-3e-6"],
   }
-}
 
-function randUniform(rng: () => number, lo: number, hi: number, n: number): number[] {
-  return Array.from({ length: n }, () => lo + rng() * (hi - lo))
-}
-
-function round4(v: number) { return Math.round(v * 10000) / 10000 }
-function clean(arr: number[]) { return arr.map(round4) }
-
-// ─── Puzzle definitions ───────────────────────────────────────────────────────
-
-interface PuzzleDef {
-  id: string
-  title: string
-  description: string
-  difficulty: 1 | 2 | 3
-  columns: string[]
-  generate(rng: () => number, n: number): { X: Record<string, number[]>; y: number[] }
-  /** The hidden formula, in the same syntax players type — must reproduce generate()'s y */
-  solution: string
-  /** Two hints, vaguest first. Point the way without giving away the answer. */
-  hints: string[]
-}
-
-const PUZZLE_DEFS: PuzzleDef[] = [
-  // ── BEGINNER ──────────────────────────────────────────────────────────────
-
-  {
-    id: 'line_01',
-    title: 'Obedient Numbers',
-    description: 'These numbers follow orders without question. A straight path awaits.',
-    difficulty: 1,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 1, 10, n)
-      const y = x.map(v => 2 * v)
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '2x',
-    hints: [
-      'Compare y with x row by row. Does the gap between them stay the same, or grow?',
-      'y ÷ x comes out the same on every row.',
-    ],
-  },
-
-  {
-    id: 'line_02',
-    title: 'The Reluctant Ascent',
-    description: 'It goes, but it goes the wrong way. Still perfectly linear.',
-    difficulty: 1,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 1, 10, n)
-      const y = x.map(v => -3 * v)
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '-3x',
-    hints: [
-      'When x goes up, which way does y go?',
-      'y ÷ x comes out the same on every row, and it is negative.',
-    ],
-  },
-
-  {
-    id: 'square_01',
-    title: 'The Bend in the Road',
-    description: 'Something bends here. Not quite a line — something rounder.',
-    difficulty: 1,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 5, n)
-      const y = x.map(v => 2 * v ** 2)
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '2x^2',
-    hints: [
-      'When x doubles, y does more than double. Find two rows where x doubles and check.',
-      'Doubling x multiplies y by 4. Think about powers of x.',
-    ],
-  },
-
-  {
-    id: 'sqrt_01',
-    title: 'Momentum Decay',
-    description: 'Fast at first, then it slows. The gains diminish.',
-    difficulty: 1,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0.5, 25, n)
-      const y = x.map(v => 4 * Math.sqrt(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '4sqrt(x)',
-    hints: [
-      'y keeps growing, but each step adds a little less than the last one.',
-      'Multiplying x by 4 only doubles y.',
-    ],
-  },
-
-  {
-    id: 'log_01',
-    title: 'The Compressed Universe',
-    description: 'Large inputs barely move the needle. Something is being compressed.',
-    difficulty: 1,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 1, 200, n)
-      const y = x.map(v => 5 * Math.log(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '5ln(x)',
-    hints: [
-      'Huge changes in x barely move y. See what happens to y when x is multiplied by 10.',
-      'Every time x is multiplied by the same factor, y goes up by the same amount.',
-    ],
-  },
-
-  {
-    id: 'distractor_01',
-    title: 'Four Suspects',
-    description: 'Four columns walk into a bar. Only one of them knows the answer.',
-    difficulty: 1,
-    columns: ['x1', 'x2', 'x3', 'x4'],
-    generate(rng, n) {
-      const x1 = randUniform(rng, 1, 10, n)
-      const x2 = randUniform(rng, 0, 20, n)
-      const x3 = randUniform(rng, -5, 5, n)
-      const x4 = randUniform(rng, 100, 200, n)
-      const y = x1.map(v => 2 * v)
-      return { X: { x1: clean(x1), x2: clean(x2), x3: clean(x3), x4: clean(x4) }, y: clean(y) }
-    },
-    solution: '2x1',
-    hints: [
-      'Not every column matters. Plot y against each column, one at a time.',
-      'Only one column lines up with y in a perfectly straight line.',
-    ],
-  },
-
-  // ── INTERMEDIATE ──────────────────────────────────────────────────────────
-
-  {
-    id: 'almost_linear_01',
-    title: 'The Imposter Line',
-    description: 'Looks linear from far away. Up close, something is off.',
-    difficulty: 2,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 4 * Math.PI, n)
-      const y = x.map(v => v + 0.5 * Math.sin(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: 'x + 0.5sin(x)',
-    hints: [
-      'Look closely: the points wiggle around a straight line.',
-      'Work out y − x for some rows. What is left repeats about every 6.28 units.',
-    ],
-  },
-
-  {
-    id: 'almost_linear_02',
-    title: 'Static on the Signal',
-    description: 'A clear trend interrupted by a stubborn rhythm.',
-    difficulty: 2,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 4 * Math.PI, n)
-      const y = x.map(v => v + Math.sin(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: 'x + sin(x)',
-    hints: [
-      'There is a straight-line trend plus something that keeps repeating.',
-      'y − x swings between −1 and 1, repeating about every 6.28 units.',
-    ],
-  },
-
-  {
-    id: 'reciprocal_01',
-    title: 'Vanishing Point',
-    description: 'As x grows, y shrinks toward nothing. What shrinks this fast?',
-    difficulty: 2,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0.5, 8, n)
-      const y = x.map(v => 10 / v)
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '10/x',
-    hints: [
-      'Multiply x by y on a few rows. Notice anything?',
-      'x × y is the same on every row.',
-    ],
-  },
-
-  {
-    id: 'abs_01',
-    title: 'The Symmetric Grudge',
-    description: 'Both sides of zero behave the same. Symmetry is the clue.',
-    difficulty: 2,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, -5, 5, n)
-      const y = x.map(v => 3 * Math.abs(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '3abs(x)',
-    hints: [
-      'Compare y at some x with y at −x.',
-      'It is a V shape: two straight lines that meet at zero.',
-    ],
-  },
-
-  {
-    id: 'cos_01',
-    title: 'The Quarter-Turn',
-    description: 'It oscillates, but it starts at its peak, not zero.',
-    difficulty: 2,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 4 * Math.PI, n)
-      const y = x.map(v => 2 * Math.cos(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '2cos(x)',
-    hints: [
-      'It repeats. Where is it highest: near x = 0, or somewhere else?',
-      'A wave at its peak when x = 0 that repeats about every 6.28 units.',
-    ],
-  },
-
-  {
-    id: 'periodic_01',
-    title: 'The Repeating Rumour',
-    description: 'It keeps coming back. The same pattern, over and over.',
-    difficulty: 2,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 4 * Math.PI, n)
-      const y = x.map(v => 3 * Math.sin(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '3sin(x)',
-    hints: [
-      'It repeats. Measure the distance between two peaks.',
-      'A wave that crosses 0 at x = 0 and repeats about every 6.28 units.',
-    ],
-  },
-
-  {
-    id: 'periodic_02',
-    title: 'Seven Days of Nothing',
-    description: 'A weekly cycle. Something resets every seven units.',
-    difficulty: 2,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 28, n)
-      const y = x.map(v => 2 * Math.sin(2 * Math.PI * v / 7))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '2sin(2pi x/7)',
-    hints: [
-      'Measure how far apart the peaks are. It is not 6.28.',
-      'The pattern repeats every 7 units. A wave that repeats every P units looks like sin(2πx/P).',
-    ],
-  },
-
-  {
-    id: 'product_01',
-    title: 'The Missing Third Variable',
-    description: 'Neither x1 nor x2 alone explains it. Something multiplies.',
-    difficulty: 2,
-    columns: ['x1', 'x2'],
-    generate(rng, n) {
-      const x1 = randUniform(rng, 1, 5, n)
-      const x2 = randUniform(rng, 1, 5, n)
-      const y = x1.map((v, i) => v * x2[i])
-      return { X: { x1: clean(x1), x2: clean(x2) }, y: clean(y) }
-    },
-    solution: 'x1*x2',
-    hints: [
-      'Neither column explains y on its own. Try combining them.',
-      'Doubling x1 doubles y. Doubling x2 also doubles y.',
-    ],
-  },
-
-  {
-    id: 'ratio_01',
-    title: 'Speed Without Units',
-    description: 'One thing divided by another. The ratio is what matters.',
-    difficulty: 2,
-    columns: ['x1', 'x2'],
-    generate(rng, n) {
-      const x1 = randUniform(rng, 1, 10, n)
-      const x2 = randUniform(rng, 0.5, 5, n)
-      const y = x1.map((v, i) => v / x2[i])
-      return { X: { x1: clean(x1), x2: clean(x2) }, y: clean(y) }
-    },
-    solution: 'x1/x2',
-    hints: [
-      'y grows with x1 but shrinks as x2 grows.',
-      'Doubling x1 doubles y. Doubling x2 halves y.',
-    ],
-  },
-
-  // ── CHALLENGE ─────────────────────────────────────────────────────────────
-
-  {
-    id: 'distance_01',
-    title: 'The Displacement Field',
-    description: 'Two dimensions. One measurement. Think Pythagoras.',
-    difficulty: 3,
-    columns: ['x1', 'x2'],
-    generate(rng, n) {
-      const x1 = randUniform(rng, 0, 5, n)
-      const x2 = randUniform(rng, 0, 5, n)
-      const y = x1.map((v, i) => Math.sqrt(v ** 2 + x2[i] ** 2))
-      return { X: { x1: clean(x1), x2: clean(x2) }, y: clean(y) }
-    },
-    solution: 'sqrt(x1^2 + x2^2)',
-    hints: [
-      'Picture (x1, x2) as a point on a grid. What could y be measuring?',
-      'y is a distance. When x2 is near 0, y is almost exactly x1.',
-    ],
-  },
-
-  {
-    id: 'cubic_01',
-    title: 'Tripling the Problem',
-    description: 'It grows, but faster than a square. Much faster.',
-    difficulty: 3,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, -3, 3, n)
-      const y = x.map(v => 2 * v ** 3)
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '2x^3',
-    hints: [
-      'Compare y at x and at −x, then see what doubling x does.',
-      'Doubling x multiplies y by 8, and y at −x is minus y at x.',
-    ],
-  },
-
-  {
-    id: 'boss_multi',
-    title: 'The Hidden Tax',
-    description: 'Three variables. Two rules. One is an interaction, one is a shift.',
-    difficulty: 3,
-    columns: ['x1', 'x2', 'x3'],
-    generate(rng, n) {
-      const x1 = randUniform(rng, 1, 5, n)
-      const x2 = randUniform(rng, 1, 5, n)
-      const x3 = randUniform(rng, 0, 3, n)
-      const y = x1.map((v, i) => v * x2[i] + 2 * x3[i])
-      return { X: { x1: clean(x1), x2: clean(x2), x3: clean(x3) }, y: clean(y) }
-    },
-    solution: 'x1*x2 + 2x3',
-    hints: [
-      'Two pieces are added together. One of them uses two columns at once.',
-      'If x3 stayed fixed, y would change like x1 times x2. The x3 piece is a straight line.',
-    ],
-  },
-
-  {
-    id: 'boss_sin_sum',
-    title: 'Interfering Signals',
-    description: 'Two waves with different periods are superimposed. Disentangle them.',
-    difficulty: 3,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 14, n)
-      const y = x.map(v => 2 * Math.sin(v) + 3 * Math.sin(2 * Math.PI * v / 7))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '2sin(x) + 3sin(2pi x/7)',
-    hints: [
-      'Two waves are added together, each repeating at a different rate.',
-      'One wave repeats about every 6.28 units, the other every 7.',
-    ],
-  },
-
-  {
-    id: 'boss_multi_feat',
-    title: 'Chaos in Three Channels',
-    description: 'Three columns, three different rules — one for each.',
-    difficulty: 3,
-    columns: ['x1', 'x2', 'x3'],
-    generate(rng, n) {
-      const x1 = randUniform(rng, 1, 5, n)
-      const x2 = randUniform(rng, 1, 20, n)
-      const x3 = randUniform(rng, 0.5, 9, n)
-      const y = x1.map((v, i) => v ** 2 + Math.log(x2[i]) + Math.sqrt(x3[i]))
-      return { X: { x1: clean(x1), x2: clean(x2), x3: clean(x3) }, y: clean(y) }
-    },
-    solution: 'x1^2 + ln(x2) + sqrt(x3)',
-    hints: [
-      'Each column adds its own separate piece, and the pieces are summed.',
-      'x1’s piece curves upward. x2’s piece flattens out very quickly. x3’s piece grows more and more slowly.',
-    ],
-  },
-
-  {
-    id: 'period_boss',
-    title: 'The Noisy Calendar',
-    description: 'A weekly rhythm, but there is noise and a distractor column.',
-    difficulty: 3,
-    columns: ['x', 'noise_col'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 28, n)
-      const noise_col = randUniform(rng, 0, 100, n)   // distractor
-      const y = x.map(v => 4 * Math.sin(2 * Math.PI * v / 7))
-      return { X: { x: clean(x), noise_col: clean(noise_col) }, y: clean(y) }
-    },
-    solution: '4sin(2pi x/7)',
-    hints: [
-      'One column is a decoy. Plot y against each column.',
-      'Against the useful column, the pattern repeats every 7 units.',
-    ],
-  },
-
-  {
-    id: 'polynomial_01',
-    title: 'The Bent Wire',
-    description: 'A parabola with a lean. Two features together explain it.',
-    difficulty: 3,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, -5, 5, n)
-      const y = x.map(v => v ** 2 - 3 * v)
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: 'x^2 - 3x',
-    hints: [
-      'It is a U shape, but the bottom of the U is not at x = 0.',
-      'The bottom of the U is at x = 1.5, and y = 0 when x = 0.',
-    ],
-  },
-
-  {
-    id: 'phase_01',
-    title: 'The Hidden Angle',
-    description: 'sin + cos. A phase shift in disguise.',
-    difficulty: 3,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 4 * Math.PI, n)
-      const y = x.map(v => Math.sin(v) + Math.cos(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: 'sin(x) + cos(x)',
-    hints: [
-      'It is a wave, but at x = 0 it is neither at zero nor at its peak.',
-      'Try adding two simple waves together.',
-    ],
-  },
-
-  {
-    id: 'exp_01',
-    title: 'The Runaway Growth',
-    description: 'Exponential. It starts slow, then it explodes.',
-    difficulty: 3,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, 0, 3, n)
-      const y = x.map(v => 2 * Math.exp(v))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '2exp(x)',
-    hints: [
-      'Each step of 1 in x multiplies y by the same amount.',
-      'y at x + 1 divided by y at x is about 2.718.',
-    ],
-  },
-
-  {
-    id: 'step_01',
-    title: 'The Great Divide',
-    description: 'On one side: one value. On the other side: another. Find the line.',
-    difficulty: 3,
-    columns: ['x'],
-    generate(rng, n) {
-      const x = randUniform(rng, -5, 5, n)
-      const y = x.map(v => 3 * (v >= 0 ? 1 : 0))
-      return { X: { x: clean(x) }, y: clean(y) }
-    },
-    solution: '3step(x)',
-    hints: [
-      'Look at what happens on either side of x = 0.',
-      'y only ever takes two values, switching at x = 0. One of the functions in the list does exactly that.',
-    ],
-  },
 ]
-
-// ─── Generate all puzzle datasets at module load ───────────────────────────────
-
-const N_SAMPLES = 200
-const BASE_SEED = 42
-
-export const PUZZLES: PuzzleData[] = PUZZLE_DEFS.map((def, idx) => {
-  const rng = mulberry32(BASE_SEED + idx * 1000)
-  const { X, y } = def.generate(rng, N_SAMPLES)
-  return {
-    id: def.id,
-    title: def.title,
-    description: def.description,
-    difficulty: def.difficulty,
-    columns: def.columns,
-    X,
-    y,
-    solution: def.solution,
-    hints: def.hints,
-  }
-})
 
 export const PUZZLE_MAP = new Map<string, PuzzleData>(PUZZLES.map((p) => [p.id, p]))
 
-/** Public puzzle info — safe to send to clients (no solution data) */
+export const PUZZLES_BY_BATCH: Partial<Record<BatchId, PuzzleData[]>> = {
+  easy:         PUZZLES.filter((p) => p.batchId === 'easy'),
+  intermediate: PUZZLES.filter((p) => p.batchId === 'intermediate'),
+}
+
 export function getPuzzleInfo(p: PuzzleData) {
   return {
-    id: p.id,
-    title: p.title,
+    puzzleType:  'numerical' as const,
+    id:          p.id,
+    title:       p.title,
     description: p.description,
-    difficulty: p.difficulty,
-    columns: p.columns,
+    difficulty:  p.difficulty,
+    batchId:     p.batchId,
+    columns:     p.columns,
   }
 }
 
-/** Puzzle data visible to players during submission (X and y, no solution) */
 export function getPuzzleForPlayers(p: PuzzleData) {
   return {
-    id: p.id,
-    title: p.title,
+    puzzleType:  'numerical' as const,
+    id:          p.id,
+    title:       p.title,
     description: p.description,
-    difficulty: p.difficulty,
-    columns: p.columns,
-    X: p.X,
-    y: p.y,
-    hintCount: p.hints.length,
+    difficulty:  p.difficulty,
+    batchId:     p.batchId,
+    columns:     p.columns,
+    X:           p.X,
+    y:           p.y,
+    hintCount:   p.hints.length,
   }
 }

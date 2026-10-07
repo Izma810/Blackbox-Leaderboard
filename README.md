@@ -1,296 +1,417 @@
-# Blackbox Leaderboard
+# Blackbox ML Game
 
-> Everyone sees the same data. Crack the hidden function. Bet on who's right.
+> Clone the repo. Look at the data. Experiment with transformations. Discover the hidden rule. Submit your answer.
 
-A real-time multiplayer game. A hidden formula maps inputs to outputs:
+No lectures. No maths homework. Just puzzles.
+
+---
+
+## What Is This?
+
+A puzzle game where a **hidden black-box function** maps inputs to outputs:
 
 ```
 x  →  ??? BLACK BOX ???  →  y
 ```
 
-Players see a scatter plot and the raw `(x, y)` rows. They race to claim the exact
-formula (`2x^2`, `3sin(x)`, `x1/x2`, …), then spend coins backing or doubting each
-other's claims. When the timer runs out every claim is judged against the data, the
-answer is revealed and wallets are settled. Most coins at the end wins.
+You can see the data. You cannot see the function. Your job is to:
 
-Built for first-year students to discover feature shapes by looking at data.
+1. Explore which features (raw or transformed) explain `y`
+2. Choose the right model (`linear_regression` or `decision_tree`)
+3. Write your answer in a JSON file
+4. Run the scorer and see your score
 
----
-
-## How a game runs
-
-1. **Host** logs in at `/admin` with the master password and creates a room.
-   Players join at `/` with the room code and a name.
-2. **Host starts a round** by picking one of the 25 puzzles.
-3. **Live round** (one timer, 300 s by default). At the same time, players can:
-   - **Post** one formula per round. Costs the post stake. A formula is rejected if
-     its predictions are within 2% of a formula someone already claimed, so `x·x`
-     is blocked once `x^2` is taken, but `3x^2` is a different claim from `2x^2`.
-   - **Vote** ▲ back or ▼ doubt on other players' formulas. Each vote costs the
-     vote stake; each player has a limited number of votes. Counts are public and live.
-   - **Buy hints**, vaguest first. Only the buyer sees them.
-4. **Results.** When the timer ends (or the host forces it) every claim is judged,
-   the hidden formula is revealed, and all stakes are settled in one database batch.
-5. The host starts another round, or ends the game and everyone sees the final leaderboard.
-
-### Typing formulas
-
-Write them the way you would on paper:
-
-```
-2x^2 + 3sin(x)      x1/x2      sqrt(x1^2 + x2^2)      4sin(2pi x/7)      y = -3x
-```
-
-- Implicit multiplication: `2x`, `3sin(x)`, `x(x+1)`, `2pi x`
-- Powers: `^` or `**`, plus `²` and `³`
-- Constants: `pi` / `π`, `e`
-- Functions: `sin cos tan exp ln log log2 log10 sqrt √ abs floor ceil step`
-- Input names are the puzzle's columns (`x`, or `x1`, `x2`, …)
-
-The parser (`shared/expression.ts`) is shared by the worker and the browser, so the
-live preview and error messages always agree with the judging.
-
-### Judging
-
-A claim's predictions `p` are compared with the true `y`:
-
-```
-dist(p, y) = ‖p − y‖ / ‖y − mean(y)‖        (= √(1 − R²))
-```
-
-| Verdict | Rule |
-|---|---|
-| **Right** | `dist ≤ 0.02` |
-| **Close** | Not right, but refitting the claim's own coefficients plus a constant makes it right — the right functions with the wrong numbers (`3x^2 + 1` when the answer is `2x^2`). Only counts if it uses no more terms than the real answer. |
-| **Wrong** | Anything else, including formulas that break on some rows (division by zero, `log` of a negative, overflow). |
-
-See `src/game/formula.ts`.
-
-### Settlement
-
-All stakes leave the wallet the moment you post, vote or buy a hint.
-With the defaults — post stake **Ps = 100**, post payout **Pp = 100**,
-vote stake **Vs = 50**, back payout **Bp = 120** (must be bigger than Pp):
-
-| You…         | Right                           | Close                 | Wrong                               |
-|--------------|---------------------------------|-----------------------|-------------------------------------|
-| posted it    | stake back + Pp, plus Vs from every doubter | stake back + Pp/2 | stake lost, and pay every doubter Vs |
-| backed it ▲  | stake back + Bp                 | stake back + Bp/2     | stake lost                          |
-| doubted it ▼ | stake goes to the poster        | stake back            | stake back + Vs from the poster     |
-
-Each right post also adds 1 to the player's score, which breaks ties on the leaderboard.
-
-### Room settings
-
-Set when the room is created and editable between rounds from the admin panel.
-
-| Setting | Default | Meaning |
-|---|---|---|
-| Starting wallet | 1000 | Coins each player starts with |
-| Round length | 300 s | Length of the live round |
-| Post stake / payout | 100 / 100 | See settlement |
-| Vote stake / back payout | 50 / 120 | See settlement |
-| Hint cost | 40 | Price per hint |
-| Votes per round | 3 | Vote budget per player |
-| Anonymous | off | Show claims as "A", "B", "C"… instead of names |
-| Max rounds | none | Auto-end the game after N rounds |
+The game teaches **feature engineering** and model selection through discovery.  
+Target audience: first-year IIT Delhi students 
 
 ---
 
-## Player identity
-
-Joining returns a `playerId` and a secret `token`, both stored in the browser's
-`localStorage` for that room. `playerId`s are public — they appear in every
-broadcast — so the **token is the credential**: it is required to rejoin under a
-taken name, to open the WebSocket, and to post, vote or buy hints.
-
-- Rejoining with the same name works only from the browser that holds the token.
-  From anywhere else the name is taken.
-- **Lost login** (cleared browser, new device): the host clicks **Reset login** next to
-  the player in the admin panel. That signs out whoever holds the old token, and the
-  next join with that name takes the account back with its wallet. Have the player
-  join right after the reset — until they do, anyone could claim the name.
-- Players created before tokens existed have none. The first join with their name
-  claims it and gets a token; after that the name is locked.
-
----
-
-## Architecture
-
-| Layer | Technology |
-|---|---|
-| API + WebSocket entry | Cloudflare Worker ([Hono](https://hono.dev)) |
-| Per-room state, timer, broadcasts | Cloudflare Durable Object (`GameRoomDO`), one per room |
-| Storage | Cloudflare D1 (SQLite) |
-| Frontend | React 18 + Vite + Tailwind, deployed on Vercel |
-
-Every game action goes through the room's Durable Object. D1 calls are not covered
-by Durable Object input gates, so the DO runs each state-changing action through a
-promise queue (`serialized()`); two simultaneous votes can never both see the same
-remaining budget or balance. The round timer is a DO alarm.
-
-Clients only **receive** over the WebSocket (plus `PING`/`PONG` keep-alive). Actions
-go over HTTP so the player gets a clear success or error response.
-
-```
-src/                          Cloudflare Worker
-├── index.ts                  Router, CORS, /ws upgrade → DO
-├── api/
-│   ├── rooms.ts              Create room, join, room snapshot, leaderboard
-│   ├── game.ts               Submit, vote, hint (token-checked, forwarded to DO)
-│   └── admin.ts              Admin routes (master password or room admin token)
-├── durable-objects/
-│   └── GameRoomDO.ts         WebSocket hub, round state machine, settlement
-├── game/
-│   ├── formula.ts            Judging, duplicate detection, least-squares refit
-│   └── puzzles.ts            25 puzzles; datasets generated at load (seeded PRNG)
-├── db/
-│   ├── schema.sql            Full schema for a fresh database
-│   ├── migrations/           ALTERs for databases created before a change
-│   └── d1.ts                 Typed query helpers, player auth check
-└── types.ts                  Shared types and the WebSocket protocol
-
-shared/
-└── expression.ts             Formula tokenizer, parser, evaluator (worker + browser)
-
-frontend/src/
-├── pages/                    Home, Room, Admin, FinalLeaderboard
-├── components/               Puzzle panel, plot, formula input, entry feed, hints, …
-├── hooks/useWebSocket.ts     Connection with backoff reconnect
-└── lib/
-    ├── backend.ts            API / WebSocket base URL
-    ├── session.ts            playerId + token in localStorage
-    └── formula.tsx           Pretty-printing formulas
-```
-
-### Round state machine
-
-```
-lobby ──start-round──▶ submission ──timer alarm / advance-phase──▶ results
-  ▲                                                                   │
-  └────────────── advance-phase / start-round ────────────────────────┘
-                                   end-game (or max rounds) ──▶ finished
-```
-
-Ending the game during a live round settles it first, so no stakes are left hanging.
-
----
-
-## HTTP API
-
-### Players
-
-| Method | Path | Body | Response |
-|---|---|---|---|
-| `POST` | `/api/rooms/:id/join` | `{ username, token? }` | `{ playerId, token, reconnected }` — `409` if the name is taken and the token doesn't match |
-| `GET` | `/api/rooms/:id` | — | Room and config |
-| `GET` | `/api/rooms/:id/leaderboard` | — | `{ leaderboard }` |
-| `POST` | `/api/rooms/:id/submit` | `{ playerId, token, expr }` | `{ ok, submissionId }` — `409` with `duplicateOf` if already claimed |
-| `POST` | `/api/rooms/:id/vote` | `{ playerId, token, submissionId, voteType: 'up' \| 'down' }` | `{ ok, votesRemaining }` |
-| `POST` | `/api/rooms/:id/hint` | `{ playerId, token }` | `{ ok, hints }` |
-| `GET` | `/ws?roomId=&playerId=&token=` | — | WebSocket upgrade |
-
-### Admin
-
-Send `Authorization: Bearer <ADMIN_PASSWORD>`. Room routes also accept the room's
-own admin token (returned when the room is created), except delete.
-
-| Method | Path | Body | Description |
-|---|---|---|---|
-| `POST` | `/api/admin/auth` | `{ password }` | Check the master password |
-| `GET` | `/api/admin/puzzles` | — | Puzzle list, no solutions (no auth) |
-| `POST` | `/api/rooms` | `{ name, ...settings }` | Create a room → `{ id, adminToken }` |
-| `GET` | `/api/rooms/:id/admin/state` | — | Full room state plus the current answer and hints |
-| `PATCH` | `/api/rooms/:id/admin/config` | snake_case settings | Change settings (not while a round is live) |
-| `POST` | `/api/rooms/:id/admin/start-round` | `{ puzzleId }` | Start a round |
-| `POST` | `/api/rooms/:id/admin/advance-phase` | — | End the live round now, or close the results |
-| `POST` | `/api/rooms/:id/admin/end-game` | — | Finish the game |
-| `POST` | `/api/rooms/:id/admin/players/:playerId/reset-login` | — | Clear a player's token and sign them out (WebSocket close `4001`) |
-| `DELETE` | `/api/rooms/:id` | — | Delete the room and all its data (master password only) |
-
-### WebSocket messages (server → client)
-
-`FULL_STATE` on connect (everything needed to rebuild the screen, including results
-if the round is settled), then `PLAYER_JOINED`, `PLAYER_UPDATED`, `PLAYER_LEFT`,
-`PHASE_CHANGED`, `SUBMISSION_MADE`, `VOTE_UPDATE`, `ROUND_RESULTS`, `GAME_ENDED`,
-`ROOM_DELETED`, `PONG`. Types are in `src/types.ts`.
-
----
-
-## Running locally
-
-Needs Node 18+.
+## Quick Start (after cloning)
 
 ```bash
-# Worker
-npm install
-echo 'ADMIN_PASSWORD=pick-something' > .dev.vars   # gitignored
-npm run db:migrate                                 # create tables in the local D1
-npm run dev                                        # http://localhost:8787
+# 1. Install
+pip install -e .
 
-# Frontend (second terminal)
-cd frontend
-npm install
-npm run dev                                        # http://localhost:5173
+# 2. List all puzzles
+python play.py list
+
+# 3. Look at a puzzle and its data
+python play.py show square_01
+
+# 4. See all available transformations
+python play.py transforms
+
+# 5. Generate a blank answers template
+python play.py template
+
+# 6. Edit my_answers.json with your guesses, then submit
+python play.py submit my_answers.json
 ```
-
-Vite proxies `/api`, `/ws` and `/health` to the worker, so leave `VITE_BACKEND_URL` unset locally.
-Open `/admin`, log in with the password from `.dev.vars`, create a room, and join it from another tab.
-
-## Deploying
-
-**Worker (Cloudflare)**
-
-```bash
-npx wrangler d1 create blackbox-leaderboard   # once; put the id in wrangler.toml
-npm run db:migrate:remote                      # fresh database only
-npx wrangler secret put ADMIN_PASSWORD
-npm run deploy
-```
-
-**Upgrading an existing database** — run each migration newer than the database, once, in order:
-
-```bash
-npm run db:migrate:0002:remote   # payouts and hints
-npm run db:migrate:0003:remote   # player tokens
-```
-
-**Frontend (Vercel)** — root directory `frontend`, build `npm run build`, output `dist`.
-Set `VITE_BACKEND_URL` to the worker URL (e.g. `https://blackbox-leaderboard.<you>.workers.dev`).
-This is required: Vercel can't proxy WebSockets, so the browser talks to the worker directly.
 
 ---
 
-## Puzzles
+## How the Game Works
 
-25 puzzles, 200 rows each, generated deterministically when the worker loads.
-The solutions and hints live in `src/game/puzzles.ts` and are never sent to players.
+### Step 1 — Read the puzzle
 
-| Difficulty | Puzzles |
-|---|---|
-| **Warm-up** | `line_01` Obedient Numbers · `line_02` The Reluctant Ascent · `square_01` The Bend in the Road · `sqrt_01` Momentum Decay · `log_01` The Compressed Universe · `distractor_01` Four Suspects (x1–x4) |
-| **Tricky** | `almost_linear_01` The Imposter Line · `almost_linear_02` Static on the Signal · `reciprocal_01` Vanishing Point · `abs_01` The Symmetric Grudge · `cos_01` The Quarter-Turn · `periodic_01` The Repeating Rumour · `periodic_02` Seven Days of Nothing · `product_01` The Missing Third Variable (x1, x2) · `ratio_01` Speed Without Units (x1, x2) |
-| **Boss** | `distance_01` The Displacement Field (x1, x2) · `cubic_01` Tripling the Problem · `boss_multi` The Hidden Tax (x1–x3) · `boss_sin_sum` Interfering Signals · `boss_multi_feat` Chaos in Three Channels (x1–x3) · `period_boss` The Noisy Calendar (x, noise_col) · `polynomial_01` The Bent Wire · `phase_01` The Hidden Angle · `exp_01` The Runaway Growth · `step_01` The Great Divide |
+```bash
+python play.py show square_01
+```
 
-### Adding a puzzle
+You'll see:
+- A cryptic description (no spoilers)
+- 12 rows of sample data
+- The list of transforms you're allowed to use
 
-Add an entry to `PUZZLE_DEFS` in `src/game/puzzles.ts`:
+### Step 2 — Fill in your answer
 
-```ts
+Open `my_answers.json`. Find the puzzle entry and fill in the `"model"` and `"features"` fields:
+
+```json
 {
-  id: 'my_puzzle_01',
-  title: 'The Swinging Ramp',
-  description: 'A cryptic one-liner shown to players.',
-  difficulty: 2,
-  columns: ['x'],
-  generate(rng, n) {
-    const x = randUniform(rng, 0, 10, n)
-    return { X: { x: clean(x) }, y: clean(x.map((v) => v * Math.sin(v))) }
-  },
-  solution: 'x sin(x)',            // same syntax players type; must reproduce y
-  hints: ['Vaguest hint first.', 'More specific second hint.'],
+  "puzzle_id": "square_01",
+  "model": "linear_regression",
+  "features": ["square:x"]
 }
 ```
 
-Append new puzzles at the end: each puzzle's random seed comes from its position in
-the list, so inserting one in the middle changes the data of every puzzle after it.
+### Step 3 — Submit
+
+```bash
+python play.py submit my_answers.json
+```
+
+You'll see:
+
+```
+✓  The Bend in the Road          [Beginner]
+   ID: square_01                  model: linear_regression
+   features: ["square:x"]
+   R² = 1.0000   score = 200
+   ✓ Correct! R² = 1.0.
+   Explanation: The rule was y = x²...
+```
+
+---
+
+## Input File Format
+
+The answers file is a **JSON file** — either a single object or an array of objects.
+
+### Single submission
+```json
+{
+    "puzzle_id": "square_01",
+    "model":     "linear_regression",
+    "features":  ["square:x"]
+}
+```
+
+### Multiple submissions (recommended)
+```json
+[
+    {
+        "puzzle_id": "line_01",
+        "model":     "linear_regression",
+        "features":  ["identity:x"]
+    },
+    {
+        "puzzle_id": "square_01",
+        "model":     "linear_regression",
+        "features":  ["square:x"]
+    },
+    {
+        "puzzle_id": "product_01",
+        "model":     "linear_regression",
+        "features":  [{"binary": "multiply", "a": "x1", "b": "x2"}]
+    }
+]
+```
+
+### Required fields
+
+| Field | Type | Values |
+|-------|------|--------|
+| `puzzle_id` | string | any ID from `python play.py list` |
+| `model` | string | `"linear_regression"` or `"decision_tree"` |
+| `features` | array | see feature format below |
+
+### Feature format
+
+Each element in `"features"` can be one of three forms:
+
+#### 1. Raw column name
+```json
+"x"
+"x1"
+```
+Uses the column as-is (equivalent to `"identity:x"`).
+
+#### 2. Transform shorthand: `"transform_key:column_name"`
+```json
+"identity:x"      // x  (no change)
+"square:x"        // x²
+"cube:x"          // x³
+"sqrt:x"          // √x
+"abs:x"           // |x|
+"log:x"           // log(x)
+"reciprocal:x"    // 1/x
+"sin:x"           // sin(x)
+"cos:x"           // cos(x)
+"sin_period7:x"   // sin(2π·x/7)
+"cos_period7:x"   // cos(2π·x/7)
+```
+
+#### 3. Binary transform dict (for combining two columns)
+```json
+{"binary": "multiply",  "a": "x1", "b": "x2"}   // x1 × x2
+{"binary": "divide",    "a": "x1", "b": "x2"}   // x1 / x2
+{"binary": "add",       "a": "x1", "b": "x2"}   // x1 + x2
+{"binary": "distance",  "a": "x1", "b": "x2"}   // √(x1² + x2²)
+```
+
+#### Multiple features (e.g. for multi-term relationships)
+```json
+["square:x", "identity:x"]           // x² and x together
+["sin:x",    "cos:x"]                 // sin(x) and cos(x) together
+["sin:x1",   "square:x2", "identity:x3"]
+```
+
+> **Scale invariance:** If the correct feature is `x`, submitting `3x` also works — linear
+> regression absorbs the constant coefficient automatically.
+
+---
+
+## Available Transforms
+
+Run `python play.py transforms` for the full list with descriptions.
+
+| Key | Formula | Power family? |
+|-----|---------|:---:|
+| `identity` | x | ✓ (x¹) |
+| `square` | x² | ✓ (x²) |
+| `cube` | x³ | ✓ (x³) |
+| `sqrt` | √x | ✓ (x^0.5) |
+| `reciprocal` | 1/x | ✓ (x^−1) |
+| `abs` | \|x\| | |
+| `log` | ln(x) | |
+| `log2` | log₂(x) | |
+| `sin` | sin(x) | |
+| `cos` | cos(x) | |
+| `sin_2pi` | sin(2π·x) | |
+| `cos_2pi` | cos(2π·x) | |
+| `sin_period7` | sin(2π·x/7) | |
+| `cos_period7` | cos(2π·x/7) | |
+| `exp` | eˣ | |
+| `floor10` | floor(x/10)·10 | |
+| `step` | 1 if x≥0 else 0 | |
+
+---
+
+## Scoring System
+
+| Outcome | Points |
+|---------|--------|
+| Correct model type | +50 |
+| Correct features (R² ≥ 0.92) | +100 |
+| Quality bonus (R² from 0.92 → 1.0) | up to +50 |
+| Wrong submission | −5 |
+
+**Total score for a perfect first attempt: 200 points.**
+
+### Fuzzy matching (partial credit)
+
+If you use a power-family transform with the **wrong exponent**, you still earn partial credit:
+
+```
+partial feature score = int(100 / |submitted_power − correct_power|)
+```
+
+Examples (correct answer is `square:x`, i.e. x²):
+
+| You submit | Power diff | Feature bonus |
+|------------|-----------|---------------|
+| `cube:x` (x³) | \|3−2\| = 1 | 99 pts |
+| `identity:x` (x¹) | \|1−2\| = 1 | 99 pts |
+| `sqrt:x` (x^0.5) | \|0.5−2\| = 1.5 | 66 pts |
+| `reciprocal:x` (x^−1) | \|−1−2\| = 3 | 33 pts |
+| `sin:x` | not power family | 0 pts |
+
+> Score is **never negative**.
+
+### What is R²?
+
+| R² | Meaning |
+|----|---------|
+| 1.0 | Perfect — your feature explains y completely |
+| 0.92+ | Correct (passes the threshold) |
+| 0.7–0.92 | Some structure captured; try a different transform |
+| 0–0.7 | Weak fit |
+| Negative | Your feature is worse than predicting the average |
+
+---
+
+## All 25 Puzzles
+
+### Beginner (6 puzzles)
+
+| ID | Title | Concept |
+|----|-------|---------|
+| `line_01` | Obedient Numbers | Positive linear relationship |
+| `line_02` | The Reluctant Ascent | Negative linear relationship |
+| `square_01` | The Bend in the Road | Feature transform: x² |
+| `sqrt_01` | Momentum Decay | Feature transform: √x |
+| `log_01` | The Compressed Universe | Feature transform: log(x) |
+| `distractor_01` | Four Suspects | Identify the one useful feature |
+
+### Intermediate (9 puzzles)
+
+| ID | Title | Concept |
+|----|-------|---------|
+| `almost_linear_01` | The Imposter Line | y = x + 0.5·sin(x) — use both |
+| `almost_linear_02` | Static on the Signal | Linear + periodic + noise |
+| `reciprocal_01` | Vanishing Point | Feature transform: 1/x |
+| `abs_01` | The Symmetric Grudge | Feature transform: \|x\| |
+| `cos_01` | The Quarter-Turn | Feature transform: cos(x) |
+| `periodic_01` | The Repeating Rumour | y = sin(x) — periodicity |
+| `periodic_02` | Seven Days of Nothing | y = sin(2πx/7) — weekly cycle |
+| `product_01` | The Missing Third Variable | y = x1 × x2 — interaction |
+| `ratio_01` | Speed Without Units | y = x1 / x2 — ratio feature |
+
+### Challenge (10 puzzles)
+
+| ID | Title | Concept |
+|----|-------|---------|
+| `circle_01` | The Exclusion Zone | **Decision tree** — circular boundary |
+| `distance_01` | The Displacement Field | y = √(x1²+x2²) — geometry |
+| `cubic_01` | Tripling the Problem | Feature transform: x³ |
+| `boss_piecewise` | The Three Regimes | **Decision tree** — 3 regions |
+| `boss_multi` | The Hidden Tax | y = x1·x2 + 2x3 — combine lessons |
+| `boss_sin_sum` | Interfering Signals | Two superimposed frequencies |
+| `boss_multi_feat` | Chaos in Three Channels | Three different transforms |
+| `period_boss` | The Noisy Calendar | Weekly cycle + noise + distractor |
+| `polynomial_01` | The Bent Wire | y = x²−3x — needs two features |
+| `phase_01` | The Hidden Angle | y = sin(x)+cos(x) — phase shift |
+
+> **Decision trees:** Only `circle_01` and `boss_piecewise` require `"model": "decision_tree"`.
+> All others use `"model": "linear_regression"`.
+
+---
+
+## Running the Tests
+
+```bash
+pytest tests/ -v
+```
+
+Expected: **130 tests pass in ~2 seconds.**
+
+---
+
+## Repository Structure
+
+```
+blackbox-ml-game/
+├── play.py                        ← START HERE — game CLI
+├── my_answers.json                ← your answers go here (after `python play.py template`)
+├── README.md
+├── requirements.txt
+├── pyproject.toml
+│
+├── src/blackbox_game/
+│   ├── __init__.py                ← public Python API
+│   ├── models.py                  ← Puzzle + FunctionSpec dataclasses
+│   ├── transforms.py              ← 17 unary + 5 binary transforms
+│   ├── puzzles.py                 ← all 25 puzzle definitions
+│   ├── generator.py               ← reproducible dataset generation
+│   ├── evaluator.py               ← sklearn model fitting
+│   ├── scoring.py                 ← scoring + fuzzy matching engine
+│   ├── hints.py                   ← explanation retrieval
+│   └── viz.py                     ← optional matplotlib helpers
+│
+└── tests/
+    ├── test_transforms.py
+    ├── test_generator.py
+    ├── test_evaluator.py
+    ├── test_puzzles.py
+    └── test_scoring.py
+```
+
+---
+
+## For Developers (Python API)
+
+The game can also be used programmatically:
+
+```python
+from blackbox_game import (
+    get_puzzle, generate_dataset, evaluate_submission, compare_models,
+    list_puzzles, list_transforms,
+)
+
+# See all puzzles
+puzzles = list_puzzles(difficulty=1)   # beginner only
+
+# Get data
+puzzle  = get_puzzle("square_01")
+dataset = generate_dataset(puzzle, n_samples=100, seed=42)
+X = dataset["X"]   # pandas DataFrame
+y = dataset["y"]   # numpy array
+
+# Submit a guess
+result = evaluate_submission(
+    puzzle_id="square_01",
+    model="linear_regression",
+    features=["square:x"],
+)
+print(result["is_correct"])   # True
+print(result["r2"])           # 1.0
+print(result["score_result"]["total_score"])  # 200
+
+# Compare both models
+comparison = compare_models("boss_piecewise", features=["identity:x"])
+print(comparison["recommended_model"])   # "decision_tree"
+```
+
+### Adding a new puzzle
+
+1. **Add a generator function** in `generator.py`:
+   ```python
+   def _fn_my_puzzle(rng, n, p):
+       x = rng.uniform(p.get("x_min", 0), p.get("x_max", 10), n)
+       return {"x": x}, np.sin(x) * x
+   _FUNCTION_REGISTRY["my_puzzle"] = _fn_my_puzzle
+   ```
+
+2. **Define the puzzle** in `puzzles.py`:
+   ```python
+   _MY_PUZZLE = _p(
+       id="my_puzzle_01",
+       title="The Swinging Ramp",
+       ...
+       function=FunctionSpec(type="my_puzzle", parameters={"x_min": 0, "x_max": 10}),
+       intended_model="linear_regression",
+       solution_features=["sin:x", "identity:x"],
+   )
+   ```
+
+3. **Add it to `PUZZLE_REGISTRY`** at the bottom of `puzzles.py`.
+
+---
+
+## FAQ
+
+**Q: What does a "fuzzy match" mean?**  
+A: You used the right *family* of transform (e.g. a power of x) but the wrong exponent. You get partial credit based on `1/|your_power − correct_power|`.
+
+**Q: Why does `cx` give the same score as `x`?**  
+A: Linear regression learns the coefficient automatically. If the true rule is `y = 3x`, submitting `identity:x` is correct — the model learns the 3.
+
+**Q: Can I use multiple features?**  
+A: Yes. `"features": ["square:x", "identity:x"]` submits both at once. Linear regression will use them together.
+
+**Q: What seed / sample size is used for scoring?**  
+A: Always `n_samples=200, seed=42`. Everyone gets the same data for every puzzle.
+
+**Q: Are there hints?**  
+A: No hints in this version. Use `python play.py show <puzzle_id>` to see the data and transforms, then experiment.

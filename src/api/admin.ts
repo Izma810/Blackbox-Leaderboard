@@ -1,179 +1,189 @@
-/**
- * Admin-only routes.
- *
- * Two-layer auth:
- *  1. Master password (ADMIN_PASSWORD env var) — required for all admin routes.
- *     Sent as:  Authorization: Bearer <ADMIN_PASSWORD>
- *  2. Per-room admin token — kept for backwards compat; also accepted on room routes.
- *     The master password is always accepted in place of a room token too.
- */
 import { Hono } from 'hono'
-import type { Env } from '../types'
-import { PUZZLES, getPuzzleInfo, PUZZLE_MAP } from '../game/puzzles'
+import type { Env, BatchId } from '../types'
+import { PUZZLES_BY_BATCH, PUZZLE_MAP, getPuzzleInfo } from '../game/puzzles'
+import { IMAGE_PUZZLES_BY_BATCH, IMAGE_PUZZLE_MAP, getImagePuzzleInfo } from '../game/imagePuzzles'
+import { getConfig, getAllTeams, getAllBatches, getSubmissionsForBatch } from '../db/d1'
 
 const admin = new Hono<{ Bindings: Env }>()
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Auth helpers ─────────────────────────────────────────────────────────────
 
-function getBearerToken(authHeader: string | undefined): string {
-  return (authHeader ?? '').replace(/^Bearer\s+/i, '').trim()
-}
-
-/** Verify master password from Authorization header. */
-function isMasterAuth(env: Env, authHeader: string | undefined): boolean {
-  const token = getBearerToken(authHeader)
+function isMaster(env: Env, authHeader: string | undefined): boolean {
+  const token = (authHeader ?? '').replace(/^Bearer\s+/i, '').trim()
   return token.length > 0 && token === env.ADMIN_PASSWORD
 }
 
-/**
- * Verify access to a specific room.
- * Accepts either the master password OR the room-specific admin token.
- */
-async function canAccessRoom(
-  env: Env,
-  roomId: string,
-  authHeader: string | undefined,
-): Promise<boolean> {
-  const token = getBearerToken(authHeader)
-  if (!token) return false
+function requireAdmin(env: Env, authHeader: string | undefined): Response | null {
+  if (!isMaster(env, authHeader)) {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+  return null
+}
 
-  // Master password grants access to every room
-  if (token === env.ADMIN_PASSWORD) return true
-
-  // Per-room token fallback
-  const row = await env.DB
-    .prepare('SELECT id FROM rooms WHERE id = ? AND admin_token = ?')
-    .bind(roomId, token)
-    .first()
-  return row !== null
+function routeToDO(env: Env, action: string, payload: unknown = {}, method = 'POST'): Promise<Response> {
+  const doId = env.GAME_ROOM.idFromName('main')
+  const stub = env.GAME_ROOM.get(doId)
+  return stub.fetch(new Request(`https://do-internal/admin/${action}`, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }))
 }
 
 // ─── POST /api/admin/auth ─────────────────────────────────────────────────────
-// Validates the master password. Called by the frontend login form.
 
-admin.post('/admin/auth', async (c) => {
+admin.post('/auth', async (c) => {
   const body = await c.req.json<{ password: string }>().catch(() => null)
   if (!body?.password) return c.json({ error: 'Password required' }, 400)
-
-  if (body.password !== c.env.ADMIN_PASSWORD) {
-    return c.json({ error: 'Invalid password' }, 401)
-  }
-
+  if (body.password !== c.env.ADMIN_PASSWORD) return c.json({ error: 'Invalid password' }, 401)
   return c.json({ ok: true })
 })
 
-// ─── GET /api/admin/puzzles ───────────────────────────────────────────────────
-// Public metadata — no auth needed (descriptions only, no solutions).
+// ─── GET /api/admin/state ─────────────────────────────────────────────────────
 
-admin.get('/admin/puzzles', (c) => {
-  return c.json({ puzzles: PUZZLES.map(getPuzzleInfo) })
-})
+admin.get('/state', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
 
-// ─── All room admin routes require master-password or room token ──────────────
-
-// GET /api/rooms/:id/admin/state
-admin.get('/rooms/:id/admin/state', async (c) => {
-  const roomId = c.req.param('id')
-  if (!await canAccessRoom(c.env, roomId, c.req.header('Authorization'))) {
-    return c.json({ error: 'Unauthorized' }, 401)
+  const puzzlesByBatch: Record<string, ReturnType<typeof getPuzzleInfo>[]> = {}
+  for (const [batchId, puzzles] of Object.entries(PUZZLES_BY_BATCH)) {
+    puzzlesByBatch[batchId] = puzzles.map(getPuzzleInfo)
   }
-  const exists = await c.env.DB.prepare('SELECT 1 FROM rooms WHERE id = ?').bind(roomId).first()
-  if (!exists) return c.json({ error: 'Room not found' }, 404)
+  // Add image puzzles
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(puzzlesByBatch as any)['image'] = (IMAGE_PUZZLES_BY_BATCH['image'] ?? []).map(getImagePuzzleInfo)
 
-  const doId = c.env.GAME_ROOM.idFromName(roomId)
-  const stub = c.env.GAME_ROOM.get(doId)
-  const res   = await stub.fetch(
-    new Request(`https://do-internal/state?roomId=${roomId}`, {
-      headers: { 'X-Room-Id': roomId },
-    }),
-  )
-  const state = await res.json() as Record<string, unknown>
+  const [config, teams, batches] = await Promise.all([
+    getConfig(c.env.DB),
+    getAllTeams(c.env.DB),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    getAllBatches(c.env.DB, puzzlesByBatch as any),
+  ])
 
-  // Attach the correct answer for the current round (admin only)
-  const round = state.currentRound as { puzzleId?: string } | null
-  let correctAnswer = null
-  if (round?.puzzleId) {
-    const puzzle = PUZZLE_MAP.get(round.puzzleId)
-    if (puzzle) {
-      correctAnswer = { solution: puzzle.solution, hints: puzzle.hints }
+  // Admin gets entry numbers too — fetch them separately
+  const memberRows = await c.env.DB
+    .prepare('SELECT team_id, name, entry_number, hostel, slot FROM team_members ORDER BY team_id, slot')
+    .all<{ team_id: string; name: string; entry_number: string; hostel: string; slot: number }>()
+
+  const membersByTeam = new Map<string, typeof memberRows.results>()
+  for (const m of memberRows.results) {
+    if (!membersByTeam.has(m.team_id)) membersByTeam.set(m.team_id, [])
+    membersByTeam.get(m.team_id)!.push(m)
+  }
+
+  const teamsAdmin = teams.map((t) => ({
+    ...t,
+    membersAdmin: (membersByTeam.get(t.id) ?? []).map((m) => ({
+      name: m.name, entryNumber: m.entry_number, hostel: m.hostel, slot: m.slot,
+    })),
+  }))
+
+  // Per-batch puzzle submissions (with solutions for admin)
+  const puzzleData: Record<string, { solution: string | string[]; hints: string[]; submissions: unknown[] }> = {}
+
+  // Numerical puzzles
+  for (const [batchId, puzzles] of Object.entries(PUZZLES_BY_BATCH)) {
+    const batchRows = await getSubmissionsForBatch(c.env.DB, batchId as BatchId)
+    for (const p of puzzles) {
+      const puzzle = PUZZLE_MAP.get(p.id)!
+      const subs = batchRows.filter((r) => r.puzzle_id === p.id).map((r) => ({
+        id: r.id, teamId: r.team_id, teamName: r.team_name, expr: r.expr,
+        stake: r.stake, r2Score: r.r2_score, verdict: r.verdict,
+        ups: r.ups ?? 0, downs: r.downs ?? 0, submittedAt: r.submitted_at,
+      }))
+      puzzleData[p.id] = { solution: puzzle.solution, hints: puzzle.hints, submissions: subs }
     }
   }
 
-  return c.json({ ...state, correctAnswer })
-})
-
-// PATCH /api/rooms/:id/admin/config
-admin.patch('/rooms/:id/admin/config', async (c) => {
-  const roomId = c.req.param('id')
-  if (!await canAccessRoom(c.env, roomId, c.req.header('Authorization'))) {
-    return c.json({ error: 'Unauthorized' }, 401)
+  // Image puzzles
+  const imageBatchRows = await getSubmissionsForBatch(c.env.DB, 'image')
+  for (const p of IMAGE_PUZZLES_BY_BATCH['image'] ?? []) {
+    const puzzle = IMAGE_PUZZLE_MAP.get(p.id)!
+    const subs = imageBatchRows.filter((r) => r.puzzle_id === p.id).map((r) => ({
+      id: r.id, teamId: r.team_id, teamName: r.team_name, expr: r.expr,
+      stake: r.stake, verdict: r.verdict,
+      ups: r.ups ?? 0, downs: r.downs ?? 0, submittedAt: r.submitted_at,
+    }))
+    puzzleData[p.id] = { solution: puzzle.correctPipeline, hints: [], submissions: subs }
   }
 
+  return c.json({ config, teams: teamsAdmin, batches, puzzleData })
+})
+
+// ─── PATCH /api/admin/config ──────────────────────────────────────────────────
+
+admin.patch('/config', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
   const body = await c.req.json().catch(() => ({}))
-  return routeToDO(c.env, roomId, 'config', body, 'PATCH')
+  return routeToDO(c.env, 'config', body, 'PATCH')
 })
 
-// POST /api/rooms/:id/admin/start-round
-admin.post('/rooms/:id/admin/start-round', async (c) => {
-  const roomId = c.req.param('id')
-  if (!await canAccessRoom(c.env, roomId, c.req.header('Authorization'))) {
-    return c.json({ error: 'Unauthorized' }, 401)
-  }
+// ─── Batch actions ────────────────────────────────────────────────────────────
 
-  const body = await c.req.json<{ puzzleId: string }>().catch(() => null)
-  if (!body?.puzzleId) return c.json({ error: 'Missing puzzleId' }, 400)
-
-  return routeToDO(c.env, roomId, 'start-round', { puzzleId: body.puzzleId })
+admin.post('/batches/:id/open', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
+  return routeToDO(c.env, 'open-batch', { batchId: c.req.param('id') })
 })
 
-// POST /api/rooms/:id/admin/advance-phase
-admin.post('/rooms/:id/admin/advance-phase', async (c) => {
-  const roomId = c.req.param('id')
-  if (!await canAccessRoom(c.env, roomId, c.req.header('Authorization'))) {
-    return c.json({ error: 'Unauthorized' }, 401)
-  }
-
-  return routeToDO(c.env, roomId, 'advance-phase', {})
+admin.patch('/batches/:id', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
+  const body = await c.req.json().catch(() => ({}))
+  return routeToDO(c.env, 'update-batch', { batchId: c.req.param('id'), ...body }, 'PATCH')
 })
 
-// POST /api/rooms/:id/admin/end-game
-admin.post('/rooms/:id/admin/end-game', async (c) => {
-  const roomId = c.req.param('id')
-  if (!await canAccessRoom(c.env, roomId, c.req.header('Authorization'))) {
-    return c.json({ error: 'Unauthorized' }, 401)
-  }
-
-  return routeToDO(c.env, roomId, 'end-game', {})
+admin.post('/batches/:id/settle', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
+  return routeToDO(c.env, 'settle-batch', { batchId: c.req.param('id') })
 })
 
-// DELETE /api/rooms/:id — permanently delete a room and everything in it.
-// Master password only: a per-room token is not enough to destroy data.
-admin.delete('/rooms/:id', async (c) => {
-  const roomId = c.req.param('id')
-  if (!isMasterAuth(c.env, c.req.header('Authorization'))) {
-    return c.json({ error: 'Unauthorized' }, 401)
-  }
-  return routeToDO(c.env, roomId, 'delete', {})
+admin.post('/batches/:id/reopen', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
+  return routeToDO(c.env, 'reopen-batch', { batchId: c.req.param('id') })
 })
 
-// ─── DO proxy helper ─────────────────────────────────────────────────────────
+// ─── End game ─────────────────────────────────────────────────────────────────
 
-async function routeToDO(
-  env: Env,
-  roomId: string,
-  action: string,
-  payload: unknown = {},
-  method = 'POST',
-): Promise<Response> {
-  const doId = env.GAME_ROOM.idFromName(roomId)
-  const stub = env.GAME_ROOM.get(doId)
-  return stub.fetch(
-    new Request(`https://do-internal/admin/${action}`, {
-      method,
-      headers: { 'Content-Type': 'application/json', 'X-Room-Id': roomId },
-      body: JSON.stringify(payload),
-    }),
-  )
-}
+admin.post('/end-game', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
+  return routeToDO(c.env, 'end-game', {})
+})
+
+// ─── Reset game ───────────────────────────────────────────────────────────────
+
+admin.post('/reset', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
+  return routeToDO(c.env, 'reset', {})
+})
+
+// ─── Team management ──────────────────────────────────────────────────────────
+
+admin.delete('/teams/:id', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
+  return routeToDO(c.env, 'remove-team', { teamId: c.req.param('id') })
+})
+
+admin.post('/teams/:id/reset-passcode', async (c) => {
+  const deny = requireAdmin(c.env, c.req.header('Authorization'))
+  if (deny) return deny
+
+  const teamId = c.req.param('id')
+  const { generatePasscode, hashPasscode } = await import('../lib/crypto')
+  const passcode = generatePasscode()
+  const { hash, salt } = await hashPasscode(passcode)
+
+  await c.env.DB
+    .prepare('UPDATE teams SET passcode_hash = ?, passcode_salt = ? WHERE id = ?')
+    .bind(hash, salt, teamId).run()
+
+  return c.json({ passcode })
+})
 
 export { admin as adminRouter }

@@ -1,4 +1,4 @@
-name = "blackbox-leaderboard"
+name = "whackamodel"
 main = "src/index.ts"
 compatibility_date = "2024-10-22"
 compatibility_flags = ["nodejs_compat"]
@@ -16,12 +16,19 @@ new_sqlite_classes = ["GameRoomDO"]
 [[d1_databases]]
 binding = "DB"
 database_name = "blackbox-leaderboard"
-# Replace with the id printed by: npx wrangler d1 create blackbox-leaderboard
-database_id = "664e0dc2-3308-44be-bd39-ca086368c765"
+database_id = "03ab4c7d-13c2-42f9-ae81-2e07e5907ad3"
 
 [vars]
 ENVIRONMENT = "production"
 
-# ADMIN_PASSWORD is a secret, not a var:
-#   local:      ADMIN_PASSWORD=... in .dev.vars (gitignored)
+# Static assets: the Vite plugin populates assets.directory from the client build.
+# run_worker_first ensures /api/* requests always hit the Worker.
+# not_found_handling = "single-page-application" makes deep links fall back to index.html.
+[assets]
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+# Secrets (not vars — never commit values):
+#   local:      set in .dev.vars (gitignored)
 #   production: npx wrangler secret put ADMIN_PASSWORD
+#               npx wrangler secret put SESSION_SECRET

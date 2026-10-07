@@ -1,60 +1,51 @@
 import { Hono } from 'hono'
-import { cors } from 'hono/cors'
 import type { Env } from './types'
-import { roomsRouter } from './api/rooms'
+import { authRouter } from './api/auth'
 import { gameRouter } from './api/game'
 import { adminRouter } from './api/admin'
+import { verifyToken } from './lib/crypto'
 
-// Re-export the Durable Object class — wrangler requires it as a named export
 export { GameRoomDO } from './durable-objects/GameRoomDO'
 
 const app = new Hono<{ Bindings: Env }>()
+const api  = new Hono<{ Bindings: Env }>()
 
-// ─── CORS ─────────────────────────────────────────────────────────────────────
-app.use('*', cors({
-  origin: '*',
-  allowHeaders: ['Content-Type', 'Authorization'],
-  allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-}))
+const SECRET = (env: Env) => env.SESSION_SECRET || 'dev_secret_change_me_in_production'
 
-// ─── WebSocket upgrade ────────────────────────────────────────────────────────
-// GET /ws?roomId=X&playerId=Y
-app.get('/ws', async (c) => {
-  const { roomId, playerId } = c.req.query()
+// ─── WebSocket upgrade  GET /api/ws?token=… ───────────────────────────────────
 
-  if (!roomId || !playerId) {
-    return c.json({ error: 'Missing roomId or playerId query params' }, 400)
-  }
+api.get('/ws', async (c) => {
+  const token = c.req.query('token')
+  if (!token) return c.json({ error: 'Missing token' }, 401)
 
-  // Validate that the player belongs to the room
-  const player = await c.env.DB
-    .prepare('SELECT id FROM players WHERE id = ? AND room_id = ?')
-    .bind(playerId, roomId)
-    .first()
+  const teamId = await verifyToken(token, SECRET(c.env))
+  if (!teamId) return c.json({ error: 'Invalid or expired token' }, 401)
 
-  if (!player) {
-    return c.json({ error: 'Player not found in this room' }, 404)
-  }
+  const team = await c.env.DB.prepare('SELECT id FROM teams WHERE id = ?').bind(teamId).first()
+  if (!team) return c.json({ error: 'Team not found' }, 404)
 
-  // Forward the raw request unchanged to the DO.
-  // Do NOT reconstruct the Request — recreating it can drop hop-by-hop headers
-  // (Upgrade, Connection) which are required for the WebSocket handshake.
-  // roomId and playerId are already in the URL's search params so the DO can read them.
-  const doId = c.env.GAME_ROOM.idFromName(roomId)
+  const doId = c.env.GAME_ROOM.idFromName('main')
   const stub = c.env.GAME_ROOM.get(doId)
-  return stub.fetch(c.req.raw)
+
+  // Pass teamId to the DO via header (preserving all WS upgrade headers)
+  const headers = new Headers(c.req.raw.headers)
+  headers.set('X-Team-Id', teamId)
+  return stub.fetch(new Request(c.req.raw.url, { method: 'GET', headers }))
 })
 
-// ─── REST API routes ──────────────────────────────────────────────────────────
-app.route('/api/rooms', roomsRouter)
-app.route('/api', gameRouter)
-app.route('/api', adminRouter)
-
 // ─── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (c) => c.json({ ok: true, ts: Date.now() }))
 
-// ─── 404 fallback ─────────────────────────────────────────────────────────────
-app.notFound((c) => c.json({ error: 'Not found' }, 404))
+api.get('/health', (c) => c.json({ ok: true, ts: Date.now() }))
+
+// ─── REST routes ──────────────────────────────────────────────────────────────
+
+api.route('/auth',  authRouter)
+api.route('/',      gameRouter)
+api.route('/admin', adminRouter)
+
+api.notFound((c) => c.json({ error: 'Not found' }, 404))
+
+app.route('/api', api)
 
 app.onError((err, c) => {
   console.error('[Worker error]', err)

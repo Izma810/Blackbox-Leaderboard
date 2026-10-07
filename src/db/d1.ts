@@ -53,12 +53,18 @@ async function getMembersForTeam(db: D1Database, teamId: string): Promise<TeamMe
   return res.results.map((m) => ({ name: m.name, hostel: m.hostel, slot: m.slot as 1 | 2 }))
 }
 
+/** Two queries however many teams there are; D1 caps queries per request (50 on the Free plan). */
 export async function getAllTeams(db: D1Database): Promise<TeamInfo[]> {
-  const res = await db.prepare('SELECT * FROM teams ORDER BY created_at ASC').all<Row>()
-  return Promise.all(res.results.map(async (r) => {
-    const members = await getMembersForTeam(db, r.id)
-    return rowToTeamInfo(r, members)
-  }))
+  const [teams, members] = await Promise.all([
+    db.prepare('SELECT * FROM teams ORDER BY created_at ASC').all<Row>(),
+    db.prepare('SELECT team_id, name, hostel, slot FROM team_members ORDER BY slot ASC').all<Row>(),
+  ])
+  const byTeam = new Map<string, TeamMemberInfo[]>()
+  for (const m of members.results) {
+    if (!byTeam.has(m.team_id)) byTeam.set(m.team_id, [])
+    byTeam.get(m.team_id)!.push({ name: m.name, hostel: m.hostel, slot: m.slot as 1 | 2 })
+  }
+  return teams.results.map((r) => rowToTeamInfo(r, byTeam.get(r.id) ?? []))
 }
 
 export async function getTeamById(db: D1Database, id: string): Promise<TeamInfo | null> {

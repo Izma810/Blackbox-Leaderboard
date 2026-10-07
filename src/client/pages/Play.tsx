@@ -264,11 +264,14 @@ export default function Play() {
   }
 
   // ─── Reload detail on my wallet change (for hint/vote coins update) ─────
+  // Only my own team's wallet: keying on every team's would make each laptop
+  // refetch the puzzle whenever anyone posts or votes.
 
+  const myWallet = gameState?.teams.find((t) => t.id === gameState.myTeamId)?.wallet
   useEffect(() => {
     if (selectedPuzzleId) refreshDetail(selectedPuzzleId)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameState?.teams])
+  }, [myWallet])
 
   // ─── Derived values ─────────────────────────────────────────────────────
 

@@ -1,15 +1,14 @@
 import type {
-  Env, ServerMessage, GameState, TeamInfo, BatchInfo, BatchSummary,
+  Env, ServerMessage, GameState, GameConfig, TeamInfo, BatchInfo, BatchSummary,
   BatchId, LeaderboardEntry, VoteType, Verdict,
 } from '../types'
-import { PUZZLE_MAP, PUZZLES_BY_BATCH, getPuzzleInfo, getPuzzleForPlayers, BATCH_NAMES } from '../game/puzzles'
+import { PUZZLE_MAP, PUZZLES_BY_BATCH, getPuzzleInfo } from '../game/puzzles'
 import { IMAGE_PUZZLE_MAP, IMAGE_PUZZLES_BY_BATCH, getImagePuzzleInfo, ALL_TRANSFORM_NAMES } from '../game/imagePuzzles'
+import type { ImagePuzzleDef } from '../game/imagePuzzles'
 import { compileFormula, judge, isDuplicatePrediction } from '../game/formula'
 import {
-  getConfig, getAllTeams, getTeamById, getAllBatches, getBatchById,
-  getSubmissionsForPuzzle, getSubmissionsForBatch, buildPublicSubmission,
-  getTeamVotesUsed, getVoteCountForSubmission, getHintsBought,
-  getTeamSubmissionMap, rowToBatchInfo,
+  getConfig, getAllTeams, getTeamById, getBatchById, getSubmissionsForBatch,
+  buildPublicSubmission, rowToBatchInfo, type SubmissionRow,
 } from '../db/d1'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -19,22 +18,77 @@ function jsonRes(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
+function batchInfo(r: Row): BatchInfo {
+  const numPuzzles = (PUZZLES_BY_BATCH[r.id as BatchId] ?? []).map(getPuzzleInfo)
+  const imgPuzzles = (IMAGE_PUZZLES_BY_BATCH[r.id as BatchId] ?? []).map(getImagePuzzleInfo)
+  return rowToBatchInfo(r, [...numPuzzles, ...imgPuzzles])
+}
+
+/** A team's in-flight submits/votes/hints beyond this are refused, so one team can't flood the queue. */
+const MAX_QUEUED_PER_TEAM = 5
+
+const SETTLEMENT_TYPES = `'post_win','post_close','post_doubter_income','back_win','back_close','doubt_refund','post_doubter_payout','doubt_win'`
+
+/**
+ * Everything player actions need to check, kept in memory so a submit or vote
+ * only touches D1 to write. This object is the only writer of game state
+ * (auth.ts only inserts teams, and tells us), so the copy stays correct as
+ * long as every write here also updates it. Admin actions and any failed
+ * write just drop it, and it's reloaded from D1 on next use.
+ */
+interface HotState {
+  config:       GameConfig
+  batches:      Map<BatchId, Row>
+  teams:        Map<string, TeamInfo>                 // registration order
+  subs:         Map<string, SubmissionRow>            // with live ups/downs
+  subsByPuzzle: Map<string, SubmissionRow[]>          // submission order, which sets anonymous labels
+  votes:        Map<string, VoteType>                 // `${voterTeamId}:${submissionId}`
+  votesUsed:    Map<string, number>
+  hints:        Map<string, number>                   // `${teamId}:${puzzleId}` → hints bought
+  predictions:  Map<string, number[] | null>          // compiled lazily for the duplicate check
+}
+
 export class GameRoomDO implements DurableObject {
   /** teamId → Set<WebSocket> — multiple laptops per team */
   private connections = new Map<string, Set<WebSocket>>()
   private ctx:   DurableObjectState
   private env:   Env
   private queue: Promise<unknown> = Promise.resolve()
+  private hot:   HotState | null = null
+  private queuedByTeam = new Map<string, number>()
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx
     this.env = env
   }
 
+  /** Runs one at a time. Every read or write of `hot` must happen in here. */
   private serialized<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(fn, fn)
+    const guarded = async () => {
+      try {
+        return await fn()
+      } catch (e) {
+        this.hot = null   // a write may or may not have landed; reload from D1
+        throw e
+      }
+    }
+    const run = this.queue.then(guarded, guarded)
     this.queue = run.catch(() => {})
     return run
+  }
+
+  private forTeam(teamId: unknown, fn: () => Promise<Response>): Promise<Response> {
+    if (typeof teamId !== 'string' || !teamId) return Promise.resolve(jsonRes({ error: 'Missing fields' }, 400))
+    const queued = this.queuedByTeam.get(teamId) ?? 0
+    if (queued >= MAX_QUEUED_PER_TEAM) {
+      return Promise.resolve(jsonRes({ error: 'Your team has too many actions in progress. Wait a moment and try again.' }, 429))
+    }
+    this.queuedByTeam.set(teamId, queued + 1)
+    return this.serialized(fn).finally(() => {
+      const left = (this.queuedByTeam.get(teamId) ?? 1) - 1
+      if (left > 0) this.queuedByTeam.set(teamId, left)
+      else this.queuedByTeam.delete(teamId)
+    })
   }
 
   // ─── Main dispatcher ──────────────────────────────────────────────────────
@@ -53,9 +107,9 @@ export class GameRoomDO implements DurableObject {
     }
 
     switch (action) {
-      case 'submit':              return this.serialized(() => this.handleSubmit(body))
-      case 'vote':                return this.serialized(() => this.handleVote(body))
-      case 'hint':                return this.serialized(() => this.handleHint(body))
+      case 'submit':              return this.forTeam(body.teamId, () => this.handleSubmit(body))
+      case 'vote':                return this.forTeam(body.teamId, () => this.handleVote(body))
+      case 'hint':                return this.forTeam(body.teamId, () => this.handleHint(body))
       case 'team-joined':         return this.serialized(() => this.handleTeamJoined(body))
       case 'admin/open-batch':    return this.serialized(() => this.handleOpenBatch(body))
       case 'admin/update-batch':  return this.serialized(() => this.handleUpdateBatch(body))
@@ -70,6 +124,72 @@ export class GameRoomDO implements DurableObject {
     }
   }
 
+  // ─── In-memory state ──────────────────────────────────────────────────────
+
+  private async state(): Promise<HotState> {
+    if (!this.hot) this.hot = await this.loadState()
+    return this.hot
+  }
+
+  private async loadState(): Promise<HotState> {
+    const db = this.env.DB
+    const [config, batchRows, teams, subRows, voteRows, hintRows] = await Promise.all([
+      getConfig(db),
+      db.prepare('SELECT * FROM batches ORDER BY rowid ASC').all<Row>(),
+      getAllTeams(db),
+      db.prepare(`
+        SELECT s.*, t.name AS team_name FROM submissions s
+        JOIN teams t ON t.id = s.team_id
+        ORDER BY s.submitted_at ASC
+      `).all<SubmissionRow>(),
+      db.prepare('SELECT submission_id, voter_team_id, vote_type FROM votes').all<Row>(),
+      db.prepare(`SELECT team_id, puzzle_id, COUNT(*) AS n FROM wallet_transactions WHERE type = 'hint' GROUP BY team_id, puzzle_id`).all<Row>(),
+    ])
+
+    const hot: HotState = {
+      config,
+      batches:      new Map(batchRows.results.map((r) => [r.id as BatchId, r])),
+      teams:        new Map(teams.map((t) => [t.id, { ...t, isConnected: this.connections.has(t.id) }])),
+      subs:         new Map(),
+      subsByPuzzle: new Map(),
+      votes:        new Map(),
+      votesUsed:    new Map(),
+      hints:        new Map(hintRows.results.map((r) => [`${r.team_id}:${r.puzzle_id}`, r.n as number])),
+      predictions:  new Map(),
+    }
+    for (const s of subRows.results) {
+      const sub = { ...s, ups: 0, downs: 0 }
+      hot.subs.set(sub.id, sub)
+      if (!hot.subsByPuzzle.has(sub.puzzle_id)) hot.subsByPuzzle.set(sub.puzzle_id, [])
+      hot.subsByPuzzle.get(sub.puzzle_id)!.push(sub)
+    }
+    for (const v of voteRows.results) {
+      hot.votes.set(`${v.voter_team_id}:${v.submission_id}`, v.vote_type)
+      hot.votesUsed.set(v.voter_team_id, (hot.votesUsed.get(v.voter_team_id) ?? 0) + 1)
+      const sub = hot.subs.get(v.submission_id)
+      if (sub) { if (v.vote_type === 'up') sub.ups!++; else sub.downs!++ }
+    }
+    return hot
+  }
+
+  /** Teams register outside this object, so one can show up before its team-joined notice. */
+  private async ensureTeam(hot: HotState, teamId: string): Promise<TeamInfo | null> {
+    const cached = hot.teams.get(teamId)
+    if (cached) return cached
+    const fresh = await getTeamById(this.env.DB, teamId)
+    if (fresh) hot.teams.set(teamId, { ...fresh, isConnected: this.connections.has(teamId) })
+    return hot.teams.get(teamId) ?? null
+  }
+
+  private predictionFor(hot: HotState, sub: SubmissionRow, X: Parameters<typeof compileFormula>[1]): number[] | null {
+    if (!hot.predictions.has(sub.id)) {
+      let p: number[] | null
+      try { p = compileFormula(sub.expr, X).prediction } catch { p = null }
+      hot.predictions.set(sub.id, p)
+    }
+    return hot.predictions.get(sub.id)!
+  }
+
   // ─── WebSocket ────────────────────────────────────────────────────────────
 
   private handleWebSocket(request: Request): Response {
@@ -82,7 +202,6 @@ export class GameRoomDO implements DurableObject {
 
     if (!this.connections.has(teamId)) this.connections.set(teamId, new Set())
     const sockets = this.connections.get(teamId)!
-    const wasOnline = sockets.size > 0
     sockets.add(server)
 
     server.addEventListener('message', (evt: MessageEvent) => {
@@ -98,7 +217,7 @@ export class GameRoomDO implements DurableObject {
       sockets.delete(server)
       if (sockets.size === 0 && this.connections.get(teamId) === sockets) {
         this.connections.delete(teamId)
-        this.ctx.waitUntil(this.onTeamOffline(teamId))
+        this.ctx.waitUntil(this.serialized(() => this.markOffline(teamId)).catch((e) => console.error('[DO] markOffline error:', e)))
       }
     })
 
@@ -107,64 +226,51 @@ export class GameRoomDO implements DurableObject {
       if (sockets.size === 0 && this.connections.get(teamId) === sockets) this.connections.delete(teamId)
     })
 
-    this.ctx.waitUntil(this.initConnection(server, teamId, wasOnline))
+    this.ctx.waitUntil(this.serialized(() => this.initConnection(server, teamId)).catch((e) => console.error('[DO] initConnection error:', e)))
     return new Response(null, { status: 101, webSocket: client })
   }
 
-  private async initConnection(server: WebSocket, teamId: string, wasOnline: boolean) {
-    try {
-      if (!wasOnline) {
-        await this.env.DB.prepare('UPDATE teams SET is_connected = 1 WHERE id = ?').bind(teamId).run()
-      }
-      const state = await this.buildGameState(teamId)
-      server.send(JSON.stringify({ type: 'FULL_STATE', state } satisfies ServerMessage))
-      if (!wasOnline) {
-        const team = state.teams.find((t) => t.id === teamId)
-        if (team) this.broadcastExcept({ type: 'TEAM_UPDATED', team }, new Set([teamId]))
-      }
-    } catch (e) {
-      console.error('[DO] initConnection error:', e)
+  private async initConnection(server: WebSocket, teamId: string) {
+    const hot  = await this.state()
+    const team = await this.ensureTeam(hot, teamId)
+    const cameOnline = !!team && !team.isConnected && this.connections.has(teamId)
+    if (cameOnline) {
+      await this.env.DB.prepare('UPDATE teams SET is_connected = 1 WHERE id = ?').bind(teamId).run()
+      team.isConnected = true
     }
+    const state = await this.buildGameState(teamId)
+    server.send(JSON.stringify({ type: 'FULL_STATE', state } satisfies ServerMessage))
+    if (cameOnline) this.broadcastExcept({ type: 'TEAM_UPDATED', team }, new Set([teamId]))
   }
 
-  private async onTeamOffline(teamId: string) {
-    try {
-      await this.env.DB.prepare('UPDATE teams SET is_connected = 0 WHERE id = ?').bind(teamId).run()
-      const team = await getTeamById(this.env.DB, teamId)
-      if (team) this.broadcast({ type: 'TEAM_UPDATED', team })
-    } catch (e) {
-      console.error('[DO] onTeamOffline error:', e)
+  private async markOffline(teamId: string) {
+    if (this.connections.has(teamId)) return   // another laptop is still (or again) connected
+    await this.env.DB.prepare('UPDATE teams SET is_connected = 0 WHERE id = ?').bind(teamId).run()
+    const team = (await this.state()).teams.get(teamId)
+    if (team) {
+      team.isConnected = false
+      this.broadcast({ type: 'TEAM_UPDATED', team })
     }
   }
 
   // ─── State builder ────────────────────────────────────────────────────────
 
   private async buildGameState(teamId?: string): Promise<GameState> {
-    const [config, teams] = await Promise.all([
-      getConfig(this.env.DB),
-      getAllTeams(this.env.DB),
-    ])
-
-    const batchRows = await this.env.DB.prepare('SELECT * FROM batches ORDER BY rowid ASC').all<Row>()
-    const batches: BatchInfo[] = batchRows.results.map((r) => {
-      const numPuzzles = (PUZZLES_BY_BATCH[r.id as BatchId] ?? []).map(getPuzzleInfo)
-      const imgPuzzles = (IMAGE_PUZZLES_BY_BATCH[r.id as BatchId] ?? []).map(getImagePuzzleInfo)
-      return rowToBatchInfo(r, [...numPuzzles, ...imgPuzzles])
-    })
-
-    let myVotesUsed = 0
-    let mySubmissions: Record<string, Verdict | null> = {}
-
+    const hot = await this.state()
+    const mySubmissions: Record<string, Verdict | null> = {}
     if (teamId) {
-      const [votes, subs] = await Promise.all([
-        getTeamVotesUsed(this.env.DB, teamId),
-        getTeamSubmissionMap(this.env.DB, teamId),
-      ])
-      myVotesUsed   = votes
-      mySubmissions = subs as Record<string, Verdict | null>
+      for (const s of hot.subs.values()) {
+        if (s.team_id === teamId) mySubmissions[s.puzzle_id] = (s.verdict as Verdict | null) ?? null
+      }
     }
-
-    return { config, teams, batches, myTeamId: teamId ?? null, myVotesUsed, mySubmissions }
+    return {
+      config:      hot.config,
+      teams:       [...hot.teams.values()],
+      batches:     [...hot.batches.values()].map(batchInfo),
+      myTeamId:    teamId ?? null,
+      myVotesUsed: teamId ? hot.votesUsed.get(teamId) ?? 0 : 0,
+      mySubmissions,
+    }
   }
 
   // ─── Submit ───────────────────────────────────────────────────────────────
@@ -180,14 +286,15 @@ export class GameRoomDO implements DurableObject {
     const puzzle = PUZZLE_MAP.get(puzzleId)
     if (!puzzle) return jsonRes({ error: 'Unknown puzzle' }, 404)
 
-    const batch = await getBatchById(this.env.DB, puzzle.batchId)
+    const hot = await this.state()
+    const batch = hot.batches.get(puzzle.batchId)
     if (!batch || batch.status !== 'open') return jsonRes({ error: 'This batch is not open' }, 400)
     if (!batch.submissions_open) return jsonRes({ error: 'Submissions are closed for this batch' }, 400)
 
-    const already = await this.env.DB
-      .prepare('SELECT id FROM submissions WHERE puzzle_id = ? AND team_id = ?')
-      .bind(puzzleId, teamId).first()
-    if (already) return jsonRes({ error: 'Your team already posted a formula for this puzzle' }, 409)
+    const existing = hot.subsByPuzzle.get(puzzleId) ?? []
+    if (existing.some((s) => s.team_id === teamId)) {
+      return jsonRes({ error: 'Your team already posted a formula for this puzzle' }, 409)
+    }
 
     let prediction: number[]
     try {
@@ -196,21 +303,16 @@ export class GameRoomDO implements DurableObject {
       return jsonRes({ error: (e as Error).message }, 400)
     }
 
-    const [config, team] = await Promise.all([
-      getConfig(this.env.DB),
-      getTeamById(this.env.DB, teamId),
-    ])
+    const team = await this.ensureTeam(hot, teamId)
     if (!team) return jsonRes({ error: 'Team not found' }, 404)
-    if (team.wallet < config.postStake) {
-      return jsonRes({ error: `Posting costs ${config.postStake} coins — you have ${team.wallet}` }, 403)
+    if (team.wallet < hot.config.postStake) {
+      return jsonRes({ error: `Posting costs ${hot.config.postStake} coins — you have ${team.wallet}` }, 403)
     }
 
     // Duplicate prediction check
-    const existing = await getSubmissionsForPuzzle(this.env.DB, puzzleId)
     for (const sub of existing) {
-      let other: number[]
-      try { ({ prediction: other } = compileFormula(sub.expr, puzzle.X)) } catch { continue }
-      if (isDuplicatePrediction(prediction, other, puzzle.y)) {
+      const other = this.predictionFor(hot, sub, puzzle.X)
+      if (other && isDuplicatePrediction(prediction, other, puzzle.y)) {
         return jsonRes({
           error: `${sub.team_name} already claimed an equivalent formula. Back it with an upvote instead.`,
           duplicateOf: sub.id,
@@ -218,47 +320,24 @@ export class GameRoomDO implements DurableObject {
       }
     }
 
-    const subId = crypto.randomUUID()
-    const now   = Date.now()
-    await this.env.DB.batch([
-      this.env.DB.prepare(
-        'INSERT INTO submissions (id, puzzle_id, batch_id, team_id, expr, stake, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      ).bind(subId, puzzleId, puzzle.batchId, teamId, expr.trim(), config.postStake, now),
-      this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?')
-        .bind(config.postStake, teamId),
-      this.env.DB.prepare(
-        'INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      ).bind(crypto.randomUUID(), teamId, puzzle.batchId, puzzleId, 'post_stake', -config.postStake, 'Posted a formula', now),
-    ])
-
-    const [updatedTeam, allSubs] = await Promise.all([
-      getTeamById(this.env.DB, teamId),
-      getSubmissionsForPuzzle(this.env.DB, puzzleId),
-    ])
-    const publicSub = buildPublicSubmission(
-      allSubs.find((s) => s.id === subId)!, config.anonymousVoting, allSubs.length - 1, false,
-    )
-
-    this.broadcast({ type: 'SUBMISSION_MADE', puzzleId, submission: publicSub })
-    if (updatedTeam) this.broadcast({ type: 'TEAM_UPDATED', team: updatedTeam })
-
+    const subId = await this.recordSubmission(hot, team, puzzleId, puzzle.batchId, expr.trim(), 'Posted a formula')
+    hot.predictions.set(subId, prediction)
     return jsonRes({ ok: true, submissionId: subId })
   }
 
   // ─── Image puzzle submit ───────────────────────────────────────────────────
 
   private async handleImageSubmit(
-    teamId: string, puzzleId: string, expr: string,
-    puzzle: import('../game/imagePuzzles').ImagePuzzleDef,
+    teamId: string, puzzleId: string, expr: string, puzzle: ImagePuzzleDef,
   ): Promise<Response> {
-    const batch = await getBatchById(this.env.DB, puzzle.batchId)
+    const hot = await this.state()
+    const batch = hot.batches.get(puzzle.batchId)
     if (!batch || batch.status !== 'open') return jsonRes({ error: 'This batch is not open' }, 400)
     if (!batch.submissions_open) return jsonRes({ error: 'Submissions are closed for this batch' }, 400)
 
-    const already = await this.env.DB
-      .prepare('SELECT id FROM submissions WHERE puzzle_id = ? AND team_id = ?')
-      .bind(puzzleId, teamId).first()
-    if (already) return jsonRes({ error: 'Your team already submitted an answer for this puzzle' }, 409)
+    if ((hot.subsByPuzzle.get(puzzleId) ?? []).some((s) => s.team_id === teamId)) {
+      return jsonRes({ error: 'Your team already submitted an answer for this puzzle' }, 409)
+    }
 
     // Parse and validate filter list
     let filters: string[]
@@ -271,41 +350,50 @@ export class GameRoomDO implements DurableObject {
       return jsonRes({ error: `Maximum ${puzzle.maxFilters} filter(s) allowed` }, 400)
     }
 
-    const [config, team] = await Promise.all([
-      getConfig(this.env.DB),
-      getTeamById(this.env.DB, teamId),
-    ])
+    const team = await this.ensureTeam(hot, teamId)
     if (!team) return jsonRes({ error: 'Team not found' }, 404)
-    if (team.wallet < config.postStake) {
-      return jsonRes({ error: `Posting costs ${config.postStake} coins — you have ${team.wallet}` }, 403)
+    if (team.wallet < hot.config.postStake) {
+      return jsonRes({ error: `Posting costs ${hot.config.postStake} coins — you have ${team.wallet}` }, 403)
     }
 
+    const subId = await this.recordSubmission(
+      hot, team, puzzleId, puzzle.batchId, JSON.stringify(filters), 'Submitted image puzzle answer',
+    )
+    return jsonRes({ ok: true, submissionId: subId })
+  }
+
+  private async recordSubmission(
+    hot: HotState, team: TeamInfo, puzzleId: string, batchId: BatchId, stored: string, note: string,
+  ): Promise<string> {
+    const stake = hot.config.postStake
     const subId = crypto.randomUUID()
     const now   = Date.now()
-    const normalised = JSON.stringify(filters)   // store as canonical JSON
-
     await this.env.DB.batch([
       this.env.DB.prepare(
         'INSERT INTO submissions (id, puzzle_id, batch_id, team_id, expr, stake, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      ).bind(subId, puzzleId, puzzle.batchId, teamId, normalised, config.postStake, now),
-      this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?').bind(config.postStake, teamId),
+      ).bind(subId, puzzleId, batchId, team.id, stored, stake, now),
+      this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?').bind(stake, team.id),
       this.env.DB.prepare(
         'INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      ).bind(crypto.randomUUID(), teamId, puzzle.batchId, puzzleId, 'post_stake', -config.postStake, 'Submitted image puzzle answer', now),
+      ).bind(crypto.randomUUID(), team.id, batchId, puzzleId, 'post_stake', -stake, note, now),
     ])
 
-    const [updatedTeam, allSubs] = await Promise.all([
-      getTeamById(this.env.DB, teamId),
-      getSubmissionsForPuzzle(this.env.DB, puzzleId),
-    ])
-    const publicSub = buildPublicSubmission(
-      allSubs.find((s) => s.id === subId)!, config.anonymousVoting, allSubs.length - 1, false,
-    )
+    const sub: SubmissionRow = {
+      id: subId, puzzle_id: puzzleId, batch_id: batchId, team_id: team.id, team_name: team.name,
+      expr: stored, stake, r2_score: null, verdict: null, submitted_at: now, ups: 0, downs: 0,
+    }
+    hot.subs.set(subId, sub)
+    if (!hot.subsByPuzzle.has(puzzleId)) hot.subsByPuzzle.set(puzzleId, [])
+    const list = hot.subsByPuzzle.get(puzzleId)!
+    list.push(sub)
+    team.wallet -= stake
 
-    this.broadcast({ type: 'SUBMISSION_MADE', puzzleId, submission: publicSub })
-    if (updatedTeam) this.broadcast({ type: 'TEAM_UPDATED', team: updatedTeam })
-
-    return jsonRes({ ok: true, submissionId: subId })
+    this.broadcast({
+      type: 'SUBMISSION_MADE', puzzleId,
+      submission: buildPublicSubmission(sub, hot.config.anonymousVoting, list.length - 1, false),
+    })
+    this.broadcast({ type: 'TEAM_UPDATED', team })
+    return subId
   }
 
   // ─── Vote ─────────────────────────────────────────────────────────────────
@@ -315,31 +403,26 @@ export class GameRoomDO implements DurableObject {
     if (!teamId || !submissionId || !voteType) return jsonRes({ error: 'Missing fields' }, 400)
     if (voteType !== 'up' && voteType !== 'down') return jsonRes({ error: 'Invalid voteType' }, 400)
 
-    const sub = await this.env.DB
-      .prepare('SELECT team_id, puzzle_id, batch_id FROM submissions WHERE id = ?')
-      .bind(submissionId).first<{ team_id: string; puzzle_id: string; batch_id: string }>()
+    const hot = await this.state()
+    const sub = hot.subs.get(submissionId)
     if (!sub) return jsonRes({ error: 'Submission not found' }, 404)
     if (sub.team_id === teamId) return jsonRes({ error: 'You cannot vote on your own team\'s formula' }, 403)
 
-    const batch = await getBatchById(this.env.DB, sub.batch_id as BatchId)
+    const batch = hot.batches.get(sub.batch_id as BatchId)
     if (!batch || batch.status !== 'open') return jsonRes({ error: 'This batch is not open' }, 400)
     if (!batch.voting_open) return jsonRes({ error: 'Voting is closed for this batch' }, 400)
 
-    const [config, team] = await Promise.all([
-      getConfig(this.env.DB),
-      getTeamById(this.env.DB, teamId),
-    ])
+    const config = hot.config
+    const team = await this.ensureTeam(hot, teamId)
     if (!team) return jsonRes({ error: 'Team not found' }, 404)
 
-    const votesUsed = await getTeamVotesUsed(this.env.DB, teamId)
+    const votesUsed = hot.votesUsed.get(teamId) ?? 0
     if (votesUsed >= config.voteBudget) {
       return jsonRes({ error: `You have used all ${config.voteBudget} votes` }, 403)
     }
 
-    const dupVote = await this.env.DB
-      .prepare('SELECT 1 FROM votes WHERE voter_team_id = ? AND submission_id = ?')
-      .bind(teamId, submissionId).first()
-    if (dupVote) return jsonRes({ error: 'You already voted on this formula' }, 409)
+    const voteKey = `${teamId}:${submissionId}`
+    if (hot.votes.has(voteKey)) return jsonRes({ error: 'You already voted on this formula' }, 409)
 
     if (team.wallet < config.voteStake) {
       return jsonRes({ error: `Voting costs ${config.voteStake} coins — you have ${team.wallet}` }, 403)
@@ -358,13 +441,14 @@ export class GameRoomDO implements DurableObject {
         voteType === 'up' ? 'Upvoted a formula' : 'Downvoted a formula', now),
     ])
 
-    const [counts, updatedTeam] = await Promise.all([
-      getVoteCountForSubmission(this.env.DB, submissionId),
-      getTeamById(this.env.DB, teamId),
-    ])
+    hot.votes.set(voteKey, voteType)
+    hot.votesUsed.set(teamId, votesUsed + 1)
+    if (voteType === 'up') sub.ups = (sub.ups ?? 0) + 1
+    else sub.downs = (sub.downs ?? 0) + 1
+    team.wallet -= config.voteStake
 
-    this.broadcast({ type: 'VOTE_CAST', puzzleId: sub.puzzle_id, submissionId, ...counts })
-    if (updatedTeam) this.broadcast({ type: 'TEAM_UPDATED', team: updatedTeam })
+    this.broadcast({ type: 'VOTE_CAST', puzzleId: sub.puzzle_id, submissionId, ups: sub.ups ?? 0, downs: sub.downs ?? 0 })
+    this.broadcast({ type: 'TEAM_UPDATED', team })
 
     return jsonRes({ ok: true, votesRemaining: config.voteBudget - votesUsed - 1 })
   }
@@ -378,15 +462,15 @@ export class GameRoomDO implements DurableObject {
     const puzzle = PUZZLE_MAP.get(puzzleId)
     if (!puzzle) return jsonRes({ error: 'Unknown puzzle' }, 404)
 
-    const batch = await getBatchById(this.env.DB, puzzle.batchId)
+    const hot = await this.state()
+    const batch = hot.batches.get(puzzle.batchId)
     if (!batch || batch.status !== 'open') return jsonRes({ error: 'Hints only available while a batch is open' }, 400)
 
-    const [config, team, bought] = await Promise.all([
-      getConfig(this.env.DB),
-      getTeamById(this.env.DB, teamId),
-      getHintsBought(this.env.DB, puzzleId, teamId),
-    ])
+    const config = hot.config
+    const team = await this.ensureTeam(hot, teamId)
     if (!team) return jsonRes({ error: 'Team not found' }, 404)
+    const hintKey = `${teamId}:${puzzleId}`
+    const bought = hot.hints.get(hintKey) ?? 0
     if (bought >= puzzle.hints.length) return jsonRes({ error: 'You already have every hint' }, 409)
     if (team.wallet < config.hintCost) {
       return jsonRes({ error: `A hint costs ${config.hintCost} coins — you have ${team.wallet}` }, 403)
@@ -401,8 +485,9 @@ export class GameRoomDO implements DurableObject {
         `Bought hint ${bought + 1}`, now),
     ])
 
-    const updatedTeam = await getTeamById(this.env.DB, teamId)
-    if (updatedTeam) this.broadcast({ type: 'TEAM_UPDATED', team: updatedTeam })
+    hot.hints.set(hintKey, bought + 1)
+    team.wallet -= config.hintCost
+    this.broadcast({ type: 'TEAM_UPDATED', team })
 
     return jsonRes({ ok: true, hints: puzzle.hints.slice(0, bought + 1) })
   }
@@ -410,7 +495,7 @@ export class GameRoomDO implements DurableObject {
   // ─── Team joined (called by auth.ts after registration) ───────────────────
 
   private async handleTeamJoined(body: Row): Promise<Response> {
-    const team = await getTeamById(this.env.DB, body.teamId)
+    const team = await this.ensureTeam(await this.state(), body.teamId)
     if (team) this.broadcast({ type: 'TEAM_JOINED', team })
     return jsonRes({ ok: true })
   }
@@ -431,13 +516,9 @@ export class GameRoomDO implements DurableObject {
       this.env.DB.prepare("UPDATE game_config SET status='active' WHERE id=1 AND status='lobby'"),
     ])
 
-    const updated = await getBatchById(this.env.DB, batchId)
-    if (updated) {
-      const numPs = (PUZZLES_BY_BATCH[batchId] ?? []).map(getPuzzleInfo)
-      const imgPs = (IMAGE_PUZZLES_BY_BATCH[batchId] ?? []).map(getImagePuzzleInfo)
-      const bi = rowToBatchInfo(updated, [...numPs, ...imgPs])
-      this.broadcast({ type: 'BATCH_UPDATED', batch: bi })
-    }
+    this.hot = null
+    const updated = (await this.state()).batches.get(batchId)
+    if (updated) this.broadcast({ type: 'BATCH_UPDATED', batch: batchInfo(updated) })
     return jsonRes({ ok: true })
   }
 
@@ -458,17 +539,18 @@ export class GameRoomDO implements DurableObject {
     vals.push(batchId)
     await this.env.DB.prepare(`UPDATE batches SET ${sets.join(', ')} WHERE id = ?`).bind(...vals).run()
 
-    const updated = await getBatchById(this.env.DB, batchId)
-    if (updated) {
-      const numPs = (PUZZLES_BY_BATCH[batchId] ?? []).map(getPuzzleInfo)
-      const imgPs = (IMAGE_PUZZLES_BY_BATCH[batchId] ?? []).map(getImagePuzzleInfo)
-      const bi = rowToBatchInfo(updated, [...numPs, ...imgPs])
-      this.broadcast({ type: 'BATCH_UPDATED', batch: bi })
-    }
+    this.hot = null
+    const updated = (await this.state()).batches.get(batchId)
+    if (updated) this.broadcast({ type: 'BATCH_UPDATED', batch: batchInfo(updated) })
     return jsonRes({ ok: true })
   }
 
   // ─── Admin: settle batch ──────────────────────────────────────────────────
+  // Payouts are computed here, then written as a fixed handful of statements that
+  // take the whole payout list as one JSON parameter. They go in a single
+  // DB.batch, which D1 applies all-or-nothing: if it fails nothing was paid and
+  // the batch is still open, so settling again is safe. It also stays well under
+  // D1's per-request query cap however many teams and votes there are.
 
   private async handleSettleBatch(body: Row): Promise<Response> {
     const batchId = body.batchId as BatchId
@@ -477,31 +559,24 @@ export class GameRoomDO implements DurableObject {
     if (batch.status !== 'open') return jsonRes({ error: 'Batch is not open' }, 409)
 
     const config = await getConfig(this.env.DB)
-    const { Ps: _Ps, Pp, Vs: _Vs, Bp } = {
-      Ps: config.postStake, Pp: config.postPayout,
-      Vs: config.voteStake, Bp: config.backPayout,
-    }
-    const Ps = config.postStake, Vs = config.voteStake
+    const Ps = config.postStake, Pp = config.postPayout
+    const Vs = config.voteStake, Bp = config.backPayout
 
     const submissionRows = await getSubmissionsForBatch(this.env.DB, batchId)
     const voteRows = await this.env.DB
       .prepare('SELECT submission_id, voter_team_id, vote_type, stake FROM votes WHERE batch_id = ?')
       .bind(batchId).all<{ submission_id: string; voter_team_id: string; vote_type: string; stake: number }>()
 
-    const stmts: import('@cloudflare/workers-types').D1PreparedStatement[] = []
+    // Positional tuples keep the JSON parameter small; the SQL below reads them by index.
+    const txns:     [string, string, string, string, number, string][] = []   // id, team, puzzle, type, delta, note
+    const verdicts: [string, number, Verdict][] = []                          // submission, r2, verdict
     const walletDeltas = new Map<string, number>()
-    const addDelta = (teamId: string, delta: number) =>
-      walletDeltas.set(teamId, (walletDeltas.get(teamId) ?? 0) + delta)
-    const now = Date.now()
+    const scoreDeltas  = new Map<string, number>()
 
     const pay = (teamId: string, delta: number, type: string, note: string, puzzleId: string) => {
       if (delta === 0) return
-      addDelta(teamId, delta)
-      stmts.push(
-        this.env.DB.prepare(
-          'INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        ).bind(crypto.randomUUID(), teamId, batchId, puzzleId, type, delta, note, now),
-      )
+      walletDeltas.set(teamId, (walletDeltas.get(teamId) ?? 0) + delta)
+      txns.push([crypto.randomUUID(), teamId, puzzleId, type, delta, note])
     }
 
     const results: BatchSummary['results'] = {}
@@ -534,17 +609,12 @@ export class GameRoomDO implements DurableObject {
         const backers  = votes.filter((v) => v.vote_type === 'up')
         const doubters = votes.filter((v) => v.vote_type === 'down')
 
-        stmts.push(
-          this.env.DB.prepare('UPDATE submissions SET r2_score = ?, verdict = ? WHERE id = ?')
-            .bind(r2, verdict, row.id),
-        )
+        verdicts.push([row.id, r2, verdict])
 
         if (verdict === 'right') {
           pay(row.team_id, Ps + Pp, 'post_win', 'Formula correct: stake back + payout', puzzleId)
           pay(row.team_id, Vs * doubters.length, 'post_doubter_income', 'Collected stakes from doubters', puzzleId)
-          stmts.push(
-            this.env.DB.prepare('UPDATE teams SET total_score = total_score + 1 WHERE id = ?').bind(row.team_id),
-          )
+          scoreDeltas.set(row.team_id, (scoreDeltas.get(row.team_id) ?? 0) + 1)
           for (const v of backers) pay(v.voter_team_id, Vs + Bp, 'back_win', 'Backed a correct formula', puzzleId)
         } else if (verdict === 'close') {
           pay(row.team_id, Ps + Math.round(Pp / 2), 'post_close', 'Right shape, wrong numbers: stake back + half payout', puzzleId)
@@ -568,30 +638,42 @@ export class GameRoomDO implements DurableObject {
       }
     }
 
-    // Apply wallet deltas
-    for (const [teamId, delta] of walletDeltas) {
-      stmts.push(
-        this.env.DB.prepare('UPDATE teams SET wallet = wallet + ? WHERE id = ?').bind(delta, teamId),
-      )
-    }
-
-    stmts.push(
-      this.env.DB.prepare("UPDATE batches SET status='settled', submissions_open=0, voting_open=0, settled_at=? WHERE id=?")
+    const now = Date.now()
+    const db  = this.env.DB
+    await db.batch([
+      db.prepare(`
+        INSERT INTO wallet_transactions (id, team_id, batch_id, puzzle_id, type, delta, note, created_at)
+        SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), ?2, json_extract(value, '$[2]'),
+               json_extract(value, '$[3]'), json_extract(value, '$[4]'), json_extract(value, '$[5]'), ?3
+        FROM json_each(?1)
+      `).bind(JSON.stringify(txns), batchId, now),
+      db.prepare(`
+        UPDATE submissions SET r2_score = j.r2, verdict = j.verdict
+        FROM (SELECT json_extract(value, '$[0]') AS id, json_extract(value, '$[1]') AS r2,
+                     json_extract(value, '$[2]') AS verdict FROM json_each(?1)) AS j
+        WHERE submissions.id = j.id
+      `).bind(JSON.stringify(verdicts)),
+      db.prepare(`
+        UPDATE teams SET wallet = wallet + j.delta
+        FROM (SELECT json_extract(value, '$[0]') AS team_id, json_extract(value, '$[1]') AS delta FROM json_each(?1)) AS j
+        WHERE teams.id = j.team_id
+      `).bind(JSON.stringify([...walletDeltas])),
+      db.prepare(`
+        UPDATE teams SET total_score = total_score + j.n
+        FROM (SELECT json_extract(value, '$[0]') AS team_id, json_extract(value, '$[1]') AS n FROM json_each(?1)) AS j
+        WHERE teams.id = j.team_id
+      `).bind(JSON.stringify([...scoreDeltas])),
+      db.prepare("UPDATE batches SET status='settled', submissions_open=0, voting_open=0, settled_at=? WHERE id=? AND status='open'")
         .bind(now, batchId),
-    )
-
-    // Run all in one batch
-    for (let i = 0; i < stmts.length; i += 80) {
-      await this.env.DB.batch(stmts.slice(i, i + 80))
-    }
-
-    const [teams, solutions] = await Promise.all([
-      getAllTeams(this.env.DB),
-      Promise.resolve(Object.fromEntries(puzzleIds.map((id) => [id, PUZZLE_MAP.get(id)?.solution ?? '']))),
     ])
 
-    // wallet deltas for summary
+    // Only the team list now (2 queries); end-game settles every batch in one
+    // request, and a full reload per batch would push it past the query cap.
+    this.hot = null
+    const teams   = await getAllTeams(this.env.DB)
     const teamMap = new Map(teams.map((t) => [t.id, t]))
+    const solutions = Object.fromEntries(puzzleIds.map((id) => [id, PUZZLE_MAP.get(id)?.solution ?? '']))
+
     const deltas = [...walletDeltas.entries()]
       .filter(([, d]) => d !== 0)
       .map(([teamId, delta]) => ({
@@ -608,6 +690,7 @@ export class GameRoomDO implements DurableObject {
   }
 
   // ─── Admin: reopen batch (undo settlement) ────────────────────────────────
+  // Same all-or-nothing approach as settling: five set-based statements in one batch.
 
   private async handleReopenBatch(body: Row): Promise<Response> {
     const batchId = body.batchId as BatchId
@@ -615,56 +698,27 @@ export class GameRoomDO implements DurableObject {
     if (!batch) return jsonRes({ error: 'Unknown batch' }, 404)
     if (batch.status !== 'settled') return jsonRes({ error: 'Batch is not settled' }, 409)
 
-    const SETTLEMENT_TYPES = ['post_win','post_close','post_doubter_income','back_win','back_close','doubt_refund','post_doubter_payout','doubt_win']
-    const placeholders = SETTLEMENT_TYPES.map(() => '?').join(',')
-
-    // Sum settlement deltas per team
-    const deltaRows = await this.env.DB
-      .prepare(`SELECT team_id, SUM(delta) as net FROM wallet_transactions WHERE batch_id = ? AND type IN (${placeholders}) GROUP BY team_id`)
-      .bind(batchId, ...SETTLEMENT_TYPES).all<{ team_id: string; net: number }>()
-
-    const stmts: import('@cloudflare/workers-types').D1PreparedStatement[] = []
-
-    // Reverse wallet changes
-    for (const { team_id, net } of deltaRows.results) {
-      if (net !== 0) {
-        stmts.push(
-          this.env.DB.prepare('UPDATE teams SET wallet = wallet - ? WHERE id = ?').bind(net, team_id),
-        )
-      }
-    }
-
-    // Decrement total_score for right submissions in this batch
-    const rightSubs = await this.env.DB
-      .prepare("SELECT DISTINCT team_id FROM submissions WHERE batch_id = ? AND verdict = 'right'")
-      .bind(batchId).all<{ team_id: string }>()
-    for (const { team_id } of rightSubs.results) {
-      stmts.push(
-        this.env.DB.prepare('UPDATE teams SET total_score = MAX(0, total_score - 1) WHERE id = ?').bind(team_id),
-      )
-    }
-
-    // Delete settlement transactions
-    stmts.push(
-      this.env.DB.prepare(`DELETE FROM wallet_transactions WHERE batch_id = ? AND type IN (${placeholders})`)
-        .bind(batchId, ...SETTLEMENT_TYPES),
-    )
-
-    // Clear verdict on submissions
-    stmts.push(
-      this.env.DB.prepare('UPDATE submissions SET r2_score = NULL, verdict = NULL WHERE batch_id = ?').bind(batchId),
-    )
-
-    // Reopen the batch
-    stmts.push(
-      this.env.DB.prepare("UPDATE batches SET status='open', submissions_open=1, voting_open=1, settled_at=NULL WHERE id=?")
+    const db = this.env.DB
+    await db.batch([
+      db.prepare(`
+        UPDATE teams SET wallet = wallet - t.net
+        FROM (SELECT team_id, SUM(delta) AS net FROM wallet_transactions
+              WHERE batch_id = ?1 AND type IN (${SETTLEMENT_TYPES}) GROUP BY team_id) AS t
+        WHERE teams.id = t.team_id
+      `).bind(batchId),
+      db.prepare(`
+        UPDATE teams SET total_score = MAX(0, total_score - s.n)
+        FROM (SELECT team_id, COUNT(*) AS n FROM submissions
+              WHERE batch_id = ?1 AND verdict = 'right' GROUP BY team_id) AS s
+        WHERE teams.id = s.team_id
+      `).bind(batchId),
+      db.prepare(`DELETE FROM wallet_transactions WHERE batch_id = ? AND type IN (${SETTLEMENT_TYPES})`).bind(batchId),
+      db.prepare('UPDATE submissions SET r2_score = NULL, verdict = NULL WHERE batch_id = ?').bind(batchId),
+      db.prepare("UPDATE batches SET status='open', submissions_open=1, voting_open=1, settled_at=NULL WHERE id=? AND status='settled'")
         .bind(batchId),
-    )
+    ])
 
-    for (let i = 0; i < stmts.length; i += 80) {
-      await this.env.DB.batch(stmts.slice(i, i + 80))
-    }
-
+    this.hot = null
     const teams = await getAllTeams(this.env.DB)
     this.broadcast({ type: 'BATCH_REOPENED', batchId, teams })
 
@@ -674,7 +728,8 @@ export class GameRoomDO implements DurableObject {
   // ─── Admin: end game ──────────────────────────────────────────────────────
 
   private async handleEndGame(): Promise<Response> {
-    // Settle any open batches first
+    // Each batch settles atomically on its own; if one fails, the ones before it
+    // stay settled and ending again picks up the rest.
     const openBatches = await this.env.DB
       .prepare("SELECT id FROM batches WHERE status = 'open'")
       .all<{ id: string }>()
@@ -683,6 +738,7 @@ export class GameRoomDO implements DurableObject {
     }
 
     await this.env.DB.prepare("UPDATE game_config SET status = 'finished' WHERE id = 1").run()
+    this.hot = null
 
     const rows = await this.env.DB
       .prepare('SELECT id, name, wallet, total_score FROM teams ORDER BY wallet DESC, total_score DESC')
@@ -712,6 +768,7 @@ export class GameRoomDO implements DurableObject {
       this.env.DB.prepare("UPDATE batches SET status='hidden', submissions_open=1, voting_open=1, opened_at=NULL, settled_at=NULL"),
       this.env.DB.prepare("UPDATE game_config SET status='lobby' WHERE id=1"),
     ])
+    this.hot = null
 
     this.broadcast({ type: 'GAME_RESET' })
     for (const sockets of this.connections.values()) {
@@ -744,6 +801,7 @@ export class GameRoomDO implements DurableObject {
 
     vals.push(1)
     await this.env.DB.prepare(`UPDATE game_config SET ${sets.join(', ')} WHERE id = ?`).bind(...vals).run()
+    this.hot = null
     return jsonRes({ ok: true })
   }
 
@@ -753,6 +811,7 @@ export class GameRoomDO implements DurableObject {
     const { teamId } = body as { teamId: string }
     // CASCADE deletes members, submissions, votes, transactions
     await this.env.DB.prepare('DELETE FROM teams WHERE id = ?').bind(teamId).run()
+    this.hot = null
 
     this.kickTeam(teamId, 'Team removed')
 
@@ -775,7 +834,7 @@ export class GameRoomDO implements DurableObject {
     const res = await this.env.DB.prepare('UPDATE teams SET token_hash = NULL WHERE id = ?').bind(teamId).run()
     if (res.meta.changes !== 1) return jsonRes({ error: 'Team not found' }, 404)
 
-    if (this.kickTeam(teamId, 'Login reset by host')) await this.onTeamOffline(teamId)
+    if (this.kickTeam(teamId, 'Login reset by host')) await this.markOffline(teamId)
     return jsonRes({ ok: true })
   }
 

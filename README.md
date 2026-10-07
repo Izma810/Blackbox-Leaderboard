@@ -8,7 +8,9 @@ The rules, payouts and default settings are in [GAME_GUIDE.md](GAME_GUIDE.md). T
 
 - **Cloudflare Workers + [Hono](https://hono.dev)** serve the API under `/api/*` and the React app for everything else.
 - **One Durable Object, `GameRoomDO`**, runs the single game room (`idFromName('main')`) that everyone plays in. Every submission, vote, hint and admin action goes through it one at a time, which is what keeps wallets consistent. It also holds every team's WebSocket and pushes live updates.
-- **D1** (SQLite) stores teams, batches, submissions, votes and the wallet log.
+- **D1** (SQLite) stores teams, batches, submissions, votes and the wallet log. The game room also keeps a copy of the live game in memory, so a submit or vote only touches D1 to write.
+- **Settling a batch is all-or-nothing.** The payouts go to D1 as a handful of statements in one batch, so a failure leaves nothing half-paid and settling again is safe.
+- **Each team can have at most 5 actions waiting in the queue**, so one team can't hold everyone else up.
 - **React + Vite + Tailwind** for the frontend, built by the Cloudflare Vite plugin.
 
 ```
@@ -59,6 +61,8 @@ npm run db:migrate:remote
 ```
 
 (Use `--local` and `npm run db:migrate` for your local database.)
+
+**Don't edit game data by hand while the game is live.** The game room works from its in-memory copy and won't see changes made directly in D1 (with `wrangler d1 execute` or the dashboard) until it restarts. After any manual change, redeploy or restart `npm run dev`. The admin page's Reset also clears the copy.
 
 ## Type-checking
 

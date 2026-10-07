@@ -8,13 +8,22 @@ interface UseWebSocketOptions {
   onClose?:  (code: number) => void
 }
 
+const FIRST_RETRY_MS = 1000
+const MAX_RETRY_MS   = 15_000
+
+/**
+ * When the server restarts, every laptop drops at the same instant. A random
+ * spread (0.5–3 s at first) stops them all reconnecting in the same moment.
+ */
+function jittered(baseMs: number): number {
+  return baseMs * (0.5 + Math.random() * 2.5)
+}
+
 export function useWebSocket({ onMessage, onOpen, onClose }: UseWebSocketOptions) {
   const wsRef      = useRef<WebSocket | null>(null)
   const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null)
   const unmounted  = useRef(false)
-  const retryDelay = useRef(1000)
-  const retryCount = useRef(0)
-  const MAX_RETRIES = 10
+  const retryDelay = useRef(FIRST_RETRY_MS)
 
   const onMessageRef = useRef(onMessage)
   const onOpenRef    = useRef(onOpen)
@@ -38,8 +47,7 @@ export function useWebSocket({ onMessage, onOpen, onClose }: UseWebSocketOptions
     wsRef.current = ws
 
     ws.onopen = () => {
-      retryDelay.current = 1000
-      retryCount.current = 0
+      retryDelay.current = FIRST_RETRY_MS
       onOpenRef.current?.()
     }
 
@@ -60,19 +68,18 @@ export function useWebSocket({ onMessage, onOpen, onClose }: UseWebSocketOptions
       if (unmounted.current) return
       // 4000 = game reset (don't retry), 4001 = team removed or login reset (don't retry)
       if (evt.code === 4000 || evt.code === 4001) return
-      if (retryCount.current >= MAX_RETRIES) return
 
-      retryCount.current++
-      const delay = Math.min(retryDelay.current, 10_000)
-      retryDelay.current = delay * 1.5
+      // Keep retrying for as long as the page is open: giving up would leave a
+      // laptop silently stuck offline mid-game after a long wifi drop.
+      const delay = jittered(retryDelay.current)
+      retryDelay.current = Math.min(retryDelay.current * 1.5, MAX_RETRY_MS / 3)
       timerRef.current = setTimeout(connect, delay)
     }
   }, []) // stable — token read dynamically each time
 
   useEffect(() => {
     unmounted.current  = false
-    retryDelay.current = 1000
-    retryCount.current = 0
+    retryDelay.current = FIRST_RETRY_MS
     connect()
 
     return () => {

@@ -17,6 +17,7 @@ import RoundIntro from '../components/RoundIntro'
 import StandingsReveal from '../components/StandingsReveal'
 import { Formula } from '../lib/formula'
 import { apiUrl } from '../lib/backend'
+import { getSession, clearSession } from '../lib/session'
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -56,10 +57,6 @@ type Action =
   | { type: 'ROOM_DELETED' }
   | { type: 'INTRO_DONE' }
   | { type: 'REVEAL_DONE' }
-
-function getMyPlayerId(roomId: string): string {
-  return localStorage.getItem(`playerId:${roomId}`) ?? ''
-}
 
 function withRoom(state: GameState, fn: (rs: RoomState) => RoomState): GameState {
   return state.roomState ? { ...state, roomState: fn(state.roomState) } : state
@@ -180,11 +177,12 @@ export default function Room() {
   const [highlightId, setHighlightId] = useState<string | null>(null)
 
   // Read once: it's cleared from storage if the room is deleted, and the page must not jump home then
-  const [playerId] = useState(() => getMyPlayerId(roomId))
+  const [session] = useState(() => getSession(roomId))
+  const playerId = session?.playerId ?? ''
 
   useEffect(() => {
-    if (!playerId) navigate('/')
-  }, [playerId, navigate])
+    if (!session) navigate('/')
+  }, [session, navigate])
 
   const onMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
@@ -207,7 +205,7 @@ export default function Room() {
   const onOpen  = useCallback(() => dispatch({ type: 'CONNECTED', v: true }),  [])
   const onClose = useCallback(() => dispatch({ type: 'CONNECTED', v: false }), [])
 
-  useWebSocket({ roomId, playerId, onMessage, onOpen, onClose })
+  useWebSocket({ roomId, playerId, token: session?.token ?? '', onMessage, onOpen, onClose })
 
   // A deleted room refuses the WebSocket, so check it exists rather than retrying forever
   useEffect(() => {
@@ -217,9 +215,7 @@ export default function Room() {
   }, [roomId])
 
   useEffect(() => {
-    if (!state.deleted) return
-    localStorage.removeItem(`playerId:${roomId}`)
-    localStorage.removeItem(`username:${roomId}`)
+    if (state.deleted) clearSession(roomId)
   }, [state.deleted, roomId])
 
   const closeReveal = useCallback(() => dispatch({ type: 'REVEAL_DONE' }), [])
@@ -331,7 +327,6 @@ export default function Room() {
                   key={roomState.currentRound?.id}
                   columns={puzzle.columns}
                   roomId={roomId}
-                  playerId={playerId}
                   stake={config.postStake}
                   wallet={me?.wallet ?? 0}
                   onSubmitted={() => {}}
@@ -354,7 +349,6 @@ export default function Room() {
               {puzzle && (
                 <HintPanel
                   roomId={roomId}
-                  playerId={playerId}
                   hints={roomState.myHints}
                   hintCount={puzzle.hintCount}
                   cost={config.hintCost}

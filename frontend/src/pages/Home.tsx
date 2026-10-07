@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { apiUrl } from '../lib/backend'
+import { getSession, saveSession } from '../lib/session'
 
 export default function Home() {
   const navigate = useNavigate()
@@ -15,23 +16,24 @@ export default function Home() {
     setError('')
     if (!roomId.trim() || !username.trim()) return
 
+    const id = roomId.trim()
+    const name = username.trim()
     setJoining(true)
     try {
-      const res = await fetch(apiUrl(`/api/rooms/${roomId.trim()}/join`), {
+      const res = await fetch(apiUrl(`/api/rooms/${id}/join`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username.trim() }),
+        body: JSON.stringify({ username: name, token: getSession(id)?.token }),
       })
-      const data = await res.json() as { playerId?: string; error?: string }
+      const data = await res.json() as { playerId?: string; token?: string; error?: string }
 
-      if (!res.ok || !data.playerId) {
+      if (!res.ok || !data.playerId || !data.token) {
         setError(data.error ?? 'Failed to join room')
         return
       }
 
-      localStorage.setItem(`playerId:${roomId.trim()}`, data.playerId)
-      localStorage.setItem(`username:${roomId.trim()}`, username.trim())
-      navigate(`/room/${roomId.trim()}`)
+      saveSession(id, { playerId: data.playerId, token: data.token, username: name })
+      navigate(`/room/${id}`)
     } catch {
       setError('Network error. Is the server running?')
     } finally {
@@ -130,7 +132,7 @@ export default function Home() {
           </button>
 
           <p className="text-center text-xs text-ink-4">
-            Rejoining? Use the same name to get your wallet back.
+            Rejoining? Use the same name on the same device to get your wallet back.
           </p>
         </form>
       </main>

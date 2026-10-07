@@ -59,10 +59,11 @@ rooms.post('/', async (c) => {
   return c.json({ id, adminToken }, 201)
 })
 
-// POST /api/rooms/:id/join — join a room with a username
+// POST /api/rooms/:id/join — join a room with a username.
+// Rejoining as an existing player requires the token issued when they first joined.
 rooms.post('/:id/join', async (c) => {
   const roomId = c.req.param('id')
-  const body = await c.req.json<{ username: string }>().catch(() => null)
+  const body = await c.req.json<{ username: string; token?: unknown }>().catch(() => null)
 
   if (!body?.username?.trim()) {
     return c.json({ error: 'Username is required' }, 400)
@@ -76,22 +77,40 @@ rooms.post('/:id/join', async (c) => {
 
   // Check if username is already taken in this room
   const existing = await c.env.DB
-    .prepare('SELECT id, is_connected FROM players WHERE room_id = ? AND username = ?')
+    .prepare('SELECT id, token FROM players WHERE room_id = ? AND username = ?')
     .bind(roomId, username)
-    .first<{ id: string; is_connected: number }>()
+    .first<{ id: string; token: string | null }>()
 
   if (existing) {
-    // Reconnection: return existing playerId
-    return c.json({ playerId: existing.id, reconnected: true })
+    if (existing.token && body.token === existing.token) {
+      return c.json({ playerId: existing.id, token: existing.token, reconnected: true })
+    }
+    if (existing.token === null) {
+      // Joined before tokens existed: the first rejoin claims the name, then it's locked
+      const token = crypto.randomUUID()
+      const claimed = await c.env.DB
+        .prepare('UPDATE players SET token = ? WHERE id = ? AND token IS NULL')
+        .bind(token, existing.id).run()
+      if (claimed.meta.changes === 1) {
+        return c.json({ playerId: existing.id, token, reconnected: true })
+      }
+    }
+    return c.json({ error: 'That name is already taken in this room. Pick another one.' }, 409)
   }
 
   const playerId = crypto.randomUUID()
-  await c.env.DB.prepare(`
-    INSERT INTO players (id, room_id, username, wallet, total_score, is_connected, joined_at)
-    VALUES (?, ?, ?, ?, 0, 0, ?)
-  `).bind(playerId, roomId, username, room.config.startingWallet, Date.now()).run()
+  const token = crypto.randomUUID()
+  const inserted = await c.env.DB.prepare(`
+    INSERT OR IGNORE INTO players (id, room_id, username, wallet, total_score, is_connected, joined_at, token)
+    VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+  `).bind(playerId, roomId, username, room.config.startingWallet, Date.now(), token).run()
 
-  return c.json({ playerId, reconnected: false }, 201)
+  // Someone else took the name between our SELECT and INSERT
+  if (inserted.meta.changes !== 1) {
+    return c.json({ error: 'That name is already taken in this room. Pick another one.' }, 409)
+  }
+
+  return c.json({ playerId, token, reconnected: false }, 201)
 })
 
 // GET /api/rooms/:id — public room snapshot

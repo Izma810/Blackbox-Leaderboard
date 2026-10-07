@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { apiUrl } from '../lib/backend'
+import { playerAuth } from '../lib/session'
 
 interface HintPanelProps {
   roomId: string
-  playerId: string
   hints: string[]
   hintCount: number
   cost: number
@@ -11,7 +11,7 @@ interface HintPanelProps {
   onBought: (hints: string[]) => void
 }
 
-export default function HintPanel({ roomId, playerId, hints, hintCount, cost, wallet, onBought }: HintPanelProps) {
+export default function HintPanel({ roomId, hints, hintCount, cost, wallet, onBought }: HintPanelProps) {
   const [buying, setBuying] = useState(false)
   const [error, setError] = useState('')
   if (hintCount === 0) return null
@@ -25,7 +25,7 @@ export default function HintPanel({ roomId, playerId, hints, hintCount, cost, wa
       const res = await fetch(apiUrl(`/api/rooms/${roomId}/hint`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playerId }),
+        body: JSON.stringify(playerAuth(roomId)),
       })
       const data = await res.json() as { ok?: boolean; hints?: string[]; error?: string }
       if (!res.ok || !data.hints) { setError(data.error ?? 'Could not buy a hint'); return }

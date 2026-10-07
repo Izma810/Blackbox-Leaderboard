@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS players (
   total_score   INTEGER NOT NULL DEFAULT 0,
   is_connected  INTEGER NOT NULL DEFAULT 0,
   joined_at     INTEGER NOT NULL,
+  token         TEXT,                               -- secret proving you are this player; never sent to others
   UNIQUE(room_id, username)
 );
 

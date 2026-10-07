@@ -1,12 +1,15 @@
 /**
- * Game action routes: submit and vote.
- * Both are routed to the GameRoomDO for serialization and race-condition safety.
+ * Game action routes: submit, vote and hint.
+ * All are routed to the GameRoomDO for serialization and race-condition safety.
+ * Each request must carry the player's token alongside their playerId.
  */
 import { Hono } from 'hono'
 import type { Env } from '../types'
-import { getRoomById, getPlayerById } from '../db/d1'
+import { isPlayerAuthorised } from '../db/d1'
 
 const game = new Hono<{ Bindings: Env }>()
+
+const UNAUTHORISED = { error: 'Your session for this room is not valid. Rejoin from the home page.' }
 
 // ─── Helper: forward request to the room's DO ─────────────────────────────────
 
@@ -33,17 +36,14 @@ async function routeToDO(
 // POST /api/rooms/:id/submit
 game.post('/rooms/:id/submit', async (c) => {
   const roomId = c.req.param('id')
-  const body = await c.req.json<{ playerId: string; expr: unknown }>().catch(() => null)
+  const body = await c.req.json<{ playerId: string; token: unknown; expr: unknown }>().catch(() => null)
 
   if (!body?.playerId || typeof body.expr !== 'string') {
     return c.json({ error: 'Missing playerId or formula' }, 400)
   }
-
-  // Quick sanity: player belongs to room
-  const player = await c.env.DB
-    .prepare('SELECT id FROM players WHERE id = ? AND room_id = ?')
-    .bind(body.playerId, roomId).first()
-  if (!player) return c.json({ error: 'Player not found in this room' }, 404)
+  if (!await isPlayerAuthorised(c.env.DB, roomId, body.playerId, body.token)) {
+    return c.json(UNAUTHORISED, 401)
+  }
 
   return routeToDO(c.env, roomId, 'submit', {
     playerId: body.playerId,
@@ -56,6 +56,7 @@ game.post('/rooms/:id/vote', async (c) => {
   const roomId = c.req.param('id')
   const body = await c.req.json<{
     playerId: string
+    token: unknown
     submissionId: string
     voteType: 'up' | 'down'
   }>().catch(() => null)
@@ -63,11 +64,9 @@ game.post('/rooms/:id/vote', async (c) => {
   if (!body?.playerId || !body.submissionId || !body.voteType) {
     return c.json({ error: 'Missing required fields: playerId, submissionId, voteType' }, 400)
   }
-
-  const player = await c.env.DB
-    .prepare('SELECT id FROM players WHERE id = ? AND room_id = ?')
-    .bind(body.playerId, roomId).first()
-  if (!player) return c.json({ error: 'Player not found in this room' }, 404)
+  if (!await isPlayerAuthorised(c.env.DB, roomId, body.playerId, body.token)) {
+    return c.json(UNAUTHORISED, 401)
+  }
 
   return routeToDO(c.env, roomId, 'vote', {
     playerId:     body.playerId,
@@ -79,13 +78,11 @@ game.post('/rooms/:id/vote', async (c) => {
 // POST /api/rooms/:id/hint — buy the next hint for the current puzzle
 game.post('/rooms/:id/hint', async (c) => {
   const roomId = c.req.param('id')
-  const body = await c.req.json<{ playerId: string }>().catch(() => null)
+  const body = await c.req.json<{ playerId: string; token: unknown }>().catch(() => null)
   if (!body?.playerId) return c.json({ error: 'Missing playerId' }, 400)
-
-  const player = await c.env.DB
-    .prepare('SELECT id FROM players WHERE id = ? AND room_id = ?')
-    .bind(body.playerId, roomId).first()
-  if (!player) return c.json({ error: 'Player not found in this room' }, 404)
+  if (!await isPlayerAuthorised(c.env.DB, roomId, body.playerId, body.token)) {
+    return c.json(UNAUTHORISED, 401)
+  }
 
   return routeToDO(c.env, roomId, 'hint', { playerId: body.playerId })
 })

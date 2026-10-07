@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { PublicSubmission, VoteCount, VoteType } from '../types'
 import { Formula } from '../lib/formula'
 import { apiUrl } from '../lib/backend'
+import { playerAuth } from '../lib/session'
 
 interface EntryFeedProps {
   submissions: PublicSubmission[]
@@ -59,7 +60,7 @@ export default function EntryFeed({
       const res = await fetch(apiUrl(`/api/rooms/${roomId}/vote`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playerId: myPlayerId, submissionId, voteType }),
+        body: JSON.stringify({ ...playerAuth(roomId), submissionId, voteType }),
       })
       const data = await res.json() as { ok?: boolean; error?: string }
       if (!res.ok || !data.ok) { setError(data.error ?? 'Vote failed'); return }

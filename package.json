@@ -9,7 +9,9 @@
     "db:migrate:remote": "wrangler d1 execute blackbox-leaderboard --remote --file=src/db/schema.sql",
     "cf-typegen": "wrangler types",
     "db:migrate:0002": "wrangler d1 execute blackbox-leaderboard --local --file=src/db/migrations/0002_payouts_and_hints.sql",
-    "db:migrate:0002:remote": "wrangler d1 execute blackbox-leaderboard --remote --file=src/db/migrations/0002_payouts_and_hints.sql"
+    "db:migrate:0002:remote": "wrangler d1 execute blackbox-leaderboard --remote --file=src/db/migrations/0002_payouts_and_hints.sql",
+    "db:migrate:0003": "wrangler d1 execute blackbox-leaderboard --local --file=src/db/migrations/0003_player_tokens.sql",
+    "db:migrate:0003:remote": "wrangler d1 execute blackbox-leaderboard --remote --file=src/db/migrations/0003_player_tokens.sql"
   },
   "dependencies": {
     "hono": "^4.6.0"

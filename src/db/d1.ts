@@ -87,6 +87,24 @@ export async function getPlayerById(db: D1Database, id: string): Promise<PlayerI
   return r ? rowToPlayerInfo(r) : null
 }
 
+/**
+ * True if `token` is the secret issued to this player when they joined.
+ * playerIds are public (they're in every broadcast), so they can't be the credential.
+ */
+export async function isPlayerAuthorised(
+  db: D1Database,
+  roomId: string,
+  playerId: unknown,
+  token: unknown,
+): Promise<boolean> {
+  if (typeof playerId !== 'string' || typeof token !== 'string' || !playerId || !token) return false
+  const r = await db
+    .prepare('SELECT 1 FROM players WHERE id = ? AND room_id = ? AND token = ?')
+    .bind(playerId, roomId, token)
+    .first()
+  return r !== null
+}
+
 export async function getPlayerVoteCount(
   db: D1Database,
   roundId: string,

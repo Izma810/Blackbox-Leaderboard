@@ -5,12 +5,13 @@ import { wsUrl } from '../lib/backend'
 interface UseWebSocketOptions {
   roomId: string
   playerId: string
+  token: string
   onMessage: (msg: ServerMessage) => void
   onOpen?: () => void
   onClose?: () => void
 }
 
-export function useWebSocket({ roomId, playerId, onMessage, onOpen, onClose }: UseWebSocketOptions) {
+export function useWebSocket({ roomId, playerId, token, onMessage, onOpen, onClose }: UseWebSocketOptions) {
   const wsRef       = useRef<WebSocket | null>(null)
   const timerRef    = useRef<ReturnType<typeof setTimeout> | null>(null)
   const unmounted   = useRef(false)
@@ -28,11 +29,12 @@ export function useWebSocket({ roomId, playerId, onMessage, onOpen, onClose }: U
     onCloseRef.current   = onClose
   })
 
-  // connect is stable: only rebuilds when roomId/playerId change
+  // connect is stable: only rebuilds when the room or session changes
   const connect = useCallback(() => {
-    if (unmounted.current) return
+    if (unmounted.current || !playerId || !token) return
 
-    const url = wsUrl(`/ws?roomId=${roomId}&playerId=${playerId}`)
+    const params = new URLSearchParams({ roomId, playerId, token })
+    const url = wsUrl(`/ws?${params}`)
 
     let ws: WebSocket
     try {
@@ -80,7 +82,7 @@ export function useWebSocket({ roomId, playerId, onMessage, onOpen, onClose }: U
       retryDelay.current = delay * 1.5
       timerRef.current = setTimeout(connect, delay)
     }
-  }, [roomId, playerId])  // ONLY these two — callbacks handled via refs above
+  }, [roomId, playerId, token])  // ONLY these — callbacks handled via refs above
 
   useEffect(() => {
     unmounted.current = false

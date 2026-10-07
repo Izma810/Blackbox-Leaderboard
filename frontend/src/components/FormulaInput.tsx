@@ -2,11 +2,11 @@ import { useMemo, useRef, useState } from 'react'
 import { parseFormula, FormulaError, MAX_FORMULA_LENGTH, type Node } from '../../../shared/expression'
 import { FormulaNode } from '../lib/formula'
 import { apiUrl } from '../lib/backend'
+import { playerAuth } from '../lib/session'
 
 interface FormulaInputProps {
   columns: string[]
   roomId: string
-  playerId: string
   stake: number
   wallet: number
   onSubmitted: () => void
@@ -33,7 +33,7 @@ const PIECES: { label: string; insert: string; back?: number; title: string }[] 
 const MORE_FUNCTIONS = 'tan, log2, log10, floor, ceil, step (1 if ≥ 0, else 0)'
 
 export default function FormulaInput({
-  columns, roomId, playerId, stake, wallet, onSubmitted, onDuplicate,
+  columns, roomId, stake, wallet, onSubmitted, onDuplicate,
 }: FormulaInputProps) {
   const [text, setText] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -77,7 +77,7 @@ export default function FormulaInput({
       const res = await fetch(apiUrl(`/api/rooms/${roomId}/submit`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playerId, expr: text }),
+        body: JSON.stringify({ ...playerAuth(roomId), expr: text }),
       })
       const data = await res.json() as { ok?: boolean; error?: string; duplicateOf?: string }
       if (!res.ok || !data.ok) {

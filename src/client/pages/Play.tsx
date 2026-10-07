@@ -54,8 +54,8 @@ type Action =
   | { type: 'SET_STATE';      state: GameState }
   | { type: 'UPSERT_TEAM';    team: TeamInfo }
   | { type: 'BATCH_UPDATED';  batch: BatchInfo }
-  | { type: 'BATCH_SETTLED';  batchId: BatchId; summary: BatchSummary; teams: TeamInfo[] }
-  | { type: 'BATCH_REOPENED'; batchId: BatchId; teams: TeamInfo[] }
+  | { type: 'BATCH_SETTLED';  batchId: BatchId; summary: BatchSummary }
+  | { type: 'BATCH_REOPENED'; batchId: BatchId }
   | { type: 'GAME_ENDED';     leaderboard: import('../types').LeaderboardEntry[] }
   | { type: 'CONNECTED';      v: boolean }
 
@@ -93,7 +93,10 @@ function reducer(state: PlayState, action: Action): PlayState {
         batchSummaries: { ...state.batchSummaries, [action.batchId]: action.summary },
         gameState: {
           ...state.gameState,
-          teams: action.teams,
+          teams: state.gameState.teams.map((t) => {
+            const d = action.summary.deltas.find((x) => x.teamId === t.id)
+            return d ? { ...t, wallet: d.newBalance } : t
+          }),
           batches: state.gameState.batches.map((b) =>
             b.id === action.batchId ? { ...b, status: 'settled', submissionsOpen: false, votingOpen: false } : b,
           ),
@@ -106,7 +109,6 @@ function reducer(state: PlayState, action: Action): PlayState {
         ...state,
         gameState: {
           ...state.gameState,
-          teams: action.teams,
           batches: state.gameState.batches.map((b) =>
             b.id === action.batchId ? { ...b, status: 'open', submissionsOpen: true, votingOpen: true } : b,
           ),
@@ -153,6 +155,7 @@ export default function Play() {
   const [showLeaderboard, setShowLeaderboard] = useState(false)
   const [showTeammateLink, setShowTeammateLink] = useState(false)
   const [highlightSubId, setHighlightSubId] = useState<string | null>(null)
+  const [standings, setStandings] = useState<TeamInfo[]>([])
   const detailPuzzleRef = useRef<string | null>(null)
 
   const { gameState, connected, finalLeaderboard } = state
@@ -187,12 +190,12 @@ export default function Play() {
         }
         break
       case 'BATCH_SETTLED':
-        dispatch({ type: 'BATCH_SETTLED', batchId: msg.batchId, summary: msg.summary, teams: msg.teams })
+        dispatch({ type: 'BATCH_SETTLED', batchId: msg.batchId, summary: msg.summary })
         // Refresh puzzle detail if it's in the settled batch
         if (detailPuzzleRef.current) refreshDetail(detailPuzzleRef.current)
         break
       case 'BATCH_REOPENED':
-        dispatch({ type: 'BATCH_REOPENED', batchId: msg.batchId, teams: msg.teams })
+        dispatch({ type: 'BATCH_REOPENED', batchId: msg.batchId })
         if (detailPuzzleRef.current) refreshDetail(detailPuzzleRef.current)
         break
       case 'GAME_ENDED':
@@ -231,6 +234,30 @@ export default function Play() {
     onOpen:    () => dispatch({ type: 'CONNECTED', v: true }),
     onClose:   onSocketClose,
   })
+
+  useEffect(() => {
+    if (!state.gameState) return
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/leaderboard')
+        if (!res.ok || cancelled) return
+        const data = await res.json() as { leaderboard: { teamId: string; teamName: string; wallet: number; totalScore: number }[] }
+        if (cancelled) return
+        setStandings(data.leaderboard.map((e) => ({
+          id: e.teamId,
+          name: e.teamName,
+          members: [],
+          wallet: e.wallet,
+          totalScore: e.totalScore,
+          isConnected: false,
+        })))
+      } catch { /* offline; next tick retries */ }
+    }
+    tick()
+    const id = setInterval(tick, 5000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [state.gameState ? true : false])
 
   // ─── Load puzzle detail ─────────────────────────────────────────────────
 
@@ -577,7 +604,11 @@ export default function Play() {
 
       {showLeaderboard && gameState && (
         <LeaderboardDialog
-          teams={gameState.teams}
+          teams={standings.map((t) =>
+            t.id === myTeamId && myGameTeam
+              ? { ...t, wallet: myGameTeam.wallet, totalScore: myGameTeam.totalScore }
+              : t,
+          )}
           myTeamId={myTeamId ?? ''}
           onClose={() => setShowLeaderboard(false)}
         />

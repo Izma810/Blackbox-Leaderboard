@@ -22,9 +22,14 @@ interface GameConfig {
   status: string; startingWallet: number; postStake: number; postPayout: number
   voteStake: number; backPayout: number; hintCost: number; voteBudget: number; anonymousVoting: boolean
 }
+interface RoomObs {
+  sockets: number; connectedTeams: number; queuedActions: number; hotLoaded: boolean
+  teams: number; submissions: number; votes: number; hints: number
+}
 interface AdminState {
   config: GameConfig; teams: TeamAdmin[]; batches: BatchAdminInfo[]
   puzzleData: Record<string, PuzzleAdminData>
+  obs: RoomObs
 }
 
 const SESSION_KEY = 'adminPassword'
@@ -167,8 +172,11 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
 
       <div className="mx-auto max-w-5xl space-y-8 px-4 py-8">
         {/* Header */}
-        <div className="flex items-center justify-between">
-          <h1 className="font-display text-3xl font-bold">Admin</h1>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="font-display text-3xl font-bold">Admin</h1>
+            <p className="mt-1 text-sm text-ink-3">Refreshes every 3 seconds. Green dots are laptops in the room right now.</p>
+          </div>
           <div className="flex items-center gap-3">
             <span className={`chip ${state.config.status === 'active' ? 'chip-up' : state.config.status === 'finished' ? 'chip-neutral' : 'chip-cobalt'}`}>
               {state.config.status}
@@ -176,6 +184,39 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
             <button className="btn-ghost text-sm" onClick={onLogout}>Log out</button>
           </div>
         </div>
+
+        <dl className="flex flex-wrap gap-x-8 gap-y-3 border-y border-line py-4 text-sm">
+          <div>
+            <dt className="text-ink-3">Registered</dt>
+            <dd className="font-display text-xl font-bold tabular">{state.obs.teams}</dd>
+          </div>
+          <div>
+            <dt className="text-ink-3">In the room</dt>
+            <dd className="font-display text-xl font-bold tabular">
+              {state.obs.connectedTeams}
+              <span className="ml-1 text-sm font-normal text-ink-3">teams / {state.obs.sockets} sockets</span>
+            </dd>
+          </div>
+          <div>
+            <dt className="text-ink-3">Claims</dt>
+            <dd className="font-display text-xl font-bold tabular">{state.obs.submissions}</dd>
+          </div>
+          <div>
+            <dt className="text-ink-3">Votes</dt>
+            <dd className="font-display text-xl font-bold tabular">{state.obs.votes}</dd>
+          </div>
+          <div>
+            <dt className="text-ink-3">Hints bought</dt>
+            <dd className="font-display text-xl font-bold tabular">{state.obs.hints}</dd>
+          </div>
+          <div>
+            <dt className="text-ink-3">Action queue</dt>
+            <dd className={`font-display text-xl font-bold tabular ${state.obs.queuedActions > 20 ? 'text-down' : state.obs.queuedActions > 0 ? 'text-accent-dark' : ''}`}>
+              {state.obs.queuedActions}
+              {state.obs.queuedActions > 20 && <span className="ml-2 text-sm font-normal">room is backed up</span>}
+            </dd>
+          </div>
+        </dl>
 
         {error && <div className="alert-error">{error}</div>}
 

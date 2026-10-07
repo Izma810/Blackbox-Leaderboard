@@ -75,8 +75,30 @@ admin.get('/state', async (c) => {
     .prepare('SELECT id FROM teams WHERE token_hash IS NULL').all<{ id: string }>()
   const awaitingReclaim = new Set(resetRows.results.map((r) => r.id))
 
+  const countsRow = await c.env.DB.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM teams) AS teams,
+      (SELECT COUNT(*) FROM submissions) AS submissions,
+      (SELECT COUNT(*) FROM votes) AS votes,
+      (SELECT COUNT(*) FROM wallet_transactions WHERE type = 'hint') AS hints
+  `).first<{ teams: number; submissions: number; votes: number; hints: number }>()
+
+  type RoomObs = {
+    sockets: number; connectedTeams: number; connectedTeamIds: string[]
+    queuedActions: number; hotLoaded: boolean
+  }
+  let room: RoomObs = {
+    sockets: 0, connectedTeams: 0, connectedTeamIds: [], queuedActions: 0, hotLoaded: false,
+  }
+  try {
+    const obsRes = await routeToDO(c.env, 'obs', {})
+    if (obsRes.ok) room = await obsRes.json() as RoomObs
+  } catch { /* room metrics stay zero */ }
+
+  const live = new Set(room.connectedTeamIds)
   const teamsAdmin = teams.map((t) => ({
     ...t,
+    isConnected: live.has(t.id),
     awaitingReclaim: awaitingReclaim.has(t.id),
     membersAdmin: (membersByTeam.get(t.id) ?? []).map((m) => ({
       name: m.name, entryNumber: m.entry_number, hostel: m.hostel, slot: m.slot,
@@ -112,7 +134,19 @@ admin.get('/state', async (c) => {
     puzzleData[p.id] = { solution: puzzle.correctPipeline, hints: [], submissions: subs }
   }
 
-  return c.json({ config, teams: teamsAdmin, batches, puzzleData })
+  return c.json({
+    config, teams: teamsAdmin, batches, puzzleData,
+    obs: {
+      sockets:         room.sockets,
+      connectedTeams:  room.connectedTeams,
+      queuedActions:   room.queuedActions,
+      hotLoaded:       room.hotLoaded,
+      teams:           countsRow?.teams ?? teamsAdmin.length,
+      submissions:     countsRow?.submissions ?? 0,
+      votes:           countsRow?.votes ?? 0,
+      hints:           countsRow?.hints ?? 0,
+    },
+  })
 })
 
 // ─── PATCH /api/admin/config ──────────────────────────────────────────────────

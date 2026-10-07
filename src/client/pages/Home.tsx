@@ -158,9 +158,8 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 py-5">
+      <header className="mx-auto flex w-full max-w-5xl items-center px-6 py-5">
         <span className="font-display text-xl font-bold tracking-tight">whackamodel</span>
-        <a href="/admin" className="btn-ghost px-3 py-2 text-sm">Admin →</a>
       </header>
 
       <main className="mx-auto grid w-full max-w-5xl flex-1 items-center gap-12 px-6 pb-16 lg:grid-cols-[1fr_1fr]">

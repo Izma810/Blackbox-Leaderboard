@@ -1,3 +1,4 @@
+import { DurableObject } from 'cloudflare:workers'
 import type {
   Env, ServerMessage, GameState, GameConfig, TeamInfo, BatchInfo, BatchSummary,
   BatchId, LeaderboardEntry, VoteType, Verdict,
@@ -49,19 +50,10 @@ interface HotState {
   predictions:  Map<string, number[] | null>          // compiled lazily for the duplicate check
 }
 
-export class GameRoomDO implements DurableObject {
-  /** teamId → Set<WebSocket> — multiple laptops per team */
-  private connections = new Map<string, Set<WebSocket>>()
-  private ctx:   DurableObjectState
-  private env:   Env
+export class GameRoomDO extends DurableObject<Env> {
   private queue: Promise<unknown> = Promise.resolve()
   private hot:   HotState | null = null
   private queuedByTeam = new Map<string, number>()
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    this.ctx = ctx
-    this.env = env
-  }
 
   /** Runs one at a time. Every read or write of `hot` must happen in here. */
   private serialized<T>(fn: () => Promise<T>): Promise<T> {
@@ -121,8 +113,30 @@ export class GameRoomDO implements DurableObject {
       case 'admin/config':        return this.serialized(() => this.handleUpdateConfig(body))
       case 'admin/remove-team':   return this.serialized(() => this.handleRemoveTeam(body))
       case 'admin/reset-login':   return this.serialized(() => this.handleResetLogin(body))
+      case 'admin/obs':           return this.handleObs()
       default:                    return new Response('Not found', { status: 404 })
     }
+  }
+
+  /** Read-only. Not serialized so a busy room still reports queue depth. */
+  private handleObs(): Response {
+    const sockets = this.ctx.getWebSockets()
+    const connectedTeamIds: string[] = []
+    const seen = new Set<string>()
+    for (const ws of sockets) {
+      for (const tag of this.ctx.getTags(ws)) {
+        if (!seen.has(tag)) { seen.add(tag); connectedTeamIds.push(tag) }
+      }
+    }
+    let queuedActions = 0
+    for (const n of this.queuedByTeam.values()) queuedActions += n
+    return jsonRes({
+      sockets: sockets.length,
+      connectedTeams: connectedTeamIds.length,
+      connectedTeamIds,
+      queuedActions,
+      hotLoaded: this.hot !== null,
+    })
   }
 
   // ─── In-memory state ──────────────────────────────────────────────────────
@@ -150,7 +164,7 @@ export class GameRoomDO implements DurableObject {
     const hot: HotState = {
       config,
       batches:      new Map(batchRows.results.map((r) => [r.id as BatchId, r])),
-      teams:        new Map(teams.map((t) => [t.id, { ...t, isConnected: this.connections.has(t.id) }])),
+      teams:        new Map(teams.map((t) => [t.id, { ...t, isConnected: false }])),
       subs:         new Map(),
       subsByPuzzle: new Map(),
       votes:        new Map(),
@@ -178,7 +192,7 @@ export class GameRoomDO implements DurableObject {
     const cached = hot.teams.get(teamId)
     if (cached) return cached
     const fresh = await getTeamById(this.env.DB, teamId)
-    if (fresh) hot.teams.set(teamId, { ...fresh, isConnected: this.connections.has(teamId) })
+    if (fresh) hot.teams.set(teamId, { ...fresh, isConnected: true })
     return hot.teams.get(teamId) ?? null
   }
 
@@ -191,7 +205,19 @@ export class GameRoomDO implements DurableObject {
     return hot.predictions.get(sub.id)!
   }
 
-  // ─── WebSocket ────────────────────────────────────────────────────────────
+  // ─── WebSocket (hibernation) ───────────────────────────────────────────────
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    try {
+      const text = typeof message === 'string' ? message : new TextDecoder().decode(message)
+      const msg = JSON.parse(text) as { type?: string }
+      if (msg.type === 'PING') ws.send(JSON.stringify({ type: 'PONG' } satisfies ServerMessage))
+    } catch { /* ignore */ }
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string, _wasClean: boolean): Promise<void> {
+    try { ws.close(code, reason) } catch { /* already closed */ }
+  }
 
   private handleWebSocket(request: Request): Response {
     const teamId = request.headers.get('X-Team-Id') ?? ''
@@ -199,59 +225,19 @@ export class GameRoomDO implements DurableObject {
 
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket]
-    server.accept()
-
-    if (!this.connections.has(teamId)) this.connections.set(teamId, new Set())
-    const sockets = this.connections.get(teamId)!
-    sockets.add(server)
-
-    server.addEventListener('message', (evt: MessageEvent) => {
-      try {
-        const msg = JSON.parse(evt.data as string)
-        if (msg.type === 'PING') server.send(JSON.stringify({ type: 'PONG' }))
-      } catch { /* ignore */ }
-    })
-
-    // A kicked team's set is detached from `connections` up front, and the team may
-    // already have a fresh set by the time these fire, so only clean up our own.
-    server.addEventListener('close', () => {
-      sockets.delete(server)
-      if (sockets.size === 0 && this.connections.get(teamId) === sockets) {
-        this.connections.delete(teamId)
-        this.ctx.waitUntil(this.serialized(() => this.markOffline(teamId)).catch((e) => console.error('[DO] markOffline error:', e)))
-      }
-    })
-
-    server.addEventListener('error', () => {
-      sockets.delete(server)
-      if (sockets.size === 0 && this.connections.get(teamId) === sockets) this.connections.delete(teamId)
-    })
-
-    this.ctx.waitUntil(this.serialized(() => this.initConnection(server, teamId)).catch((e) => console.error('[DO] initConnection error:', e)))
+    this.ctx.acceptWebSocket(server, [teamId])
+    this.ctx.waitUntil(
+      this.serialized(() => this.initConnection(server, teamId))
+        .catch((e) => console.error('[DO] initConnection error:', e)),
+    )
     return new Response(null, { status: 101, webSocket: client })
   }
 
   private async initConnection(server: WebSocket, teamId: string) {
-    const hot  = await this.state()
-    const team = await this.ensureTeam(hot, teamId)
-    const cameOnline = !!team && !team.isConnected && this.connections.has(teamId)
-    if (cameOnline) {
-      await this.env.DB.prepare('UPDATE teams SET is_connected = 1 WHERE id = ?').bind(teamId).run()
-      team.isConnected = true
-    }
+    const hot = await this.state()
+    await this.ensureTeam(hot, teamId)
     const state = await this.buildGameState(teamId)
-    server.send(JSON.stringify({ type: 'FULL_STATE', state } satisfies ServerMessage))
-    if (cameOnline) this.broadcastExcept({ type: 'TEAM_UPDATED', team }, new Set([teamId]))
-  }
-
-  private async markOffline(teamId: string) {
-    if (this.connections.has(teamId)) return   // another laptop is still (or again) connected
-    await this.env.DB.prepare('UPDATE teams SET is_connected = 0 WHERE id = ?').bind(teamId).run()
-    const team = (await this.state()).teams.get(teamId)
-    if (team) {
-      team.isConnected = false
-      this.broadcast({ type: 'TEAM_UPDATED', team })
-    }
+    try { server.send(JSON.stringify({ type: 'FULL_STATE', state } satisfies ServerMessage)) } catch { /* closed */ }
   }
 
   // ─── State builder ────────────────────────────────────────────────────────
@@ -264,9 +250,10 @@ export class GameRoomDO implements DurableObject {
         if (s.team_id === teamId) mySubmissions[s.puzzle_id] = (s.verdict as Verdict | null) ?? null
       }
     }
+    const me = teamId ? hot.teams.get(teamId) : undefined
     return {
       config:      hot.config,
-      teams:       [...hot.teams.values()],
+      teams:       me ? [me] : [],
       batches:     [...hot.batches.values()].map(batchInfo),
       myTeamId:    teamId ?? null,
       myVotesUsed: teamId ? hot.votesUsed.get(teamId) ?? 0 : 0,
@@ -409,11 +396,11 @@ export class GameRoomDO implements DurableObject {
     list.push(sub)
     team.wallet -= stake
 
-    this.broadcast({
+    this.sendToTeam(team.id, { type: 'TEAM_UPDATED', team })
+    this.deferBroadcast({
       type: 'SUBMISSION_MADE', puzzleId,
       submission: buildPublicSubmission(sub, hot.config.anonymousVoting, list.length - 1, false),
     })
-    this.broadcast({ type: 'TEAM_UPDATED', team })
     return subId
   }
 
@@ -468,8 +455,8 @@ export class GameRoomDO implements DurableObject {
     else sub.downs = (sub.downs ?? 0) + 1
     team.wallet -= config.voteStake
 
-    this.broadcast({ type: 'VOTE_CAST', puzzleId: sub.puzzle_id, submissionId, ups: sub.ups ?? 0, downs: sub.downs ?? 0 })
-    this.broadcast({ type: 'TEAM_UPDATED', team })
+    this.sendToTeam(teamId, { type: 'TEAM_UPDATED', team })
+    this.deferBroadcast({ type: 'VOTE_CAST', puzzleId: sub.puzzle_id, submissionId, ups: sub.ups ?? 0, downs: sub.downs ?? 0 })
 
     return jsonRes({ ok: true, votesRemaining: config.voteBudget - votesUsed - 1 })
   }
@@ -508,7 +495,7 @@ export class GameRoomDO implements DurableObject {
 
     hot.hints.set(hintKey, bought + 1)
     team.wallet -= config.hintCost
-    this.broadcast({ type: 'TEAM_UPDATED', team })
+    this.sendToTeam(teamId, { type: 'TEAM_UPDATED', team })
 
     return jsonRes({ ok: true, hints: puzzle.hints.slice(0, bought + 1) })
   }
@@ -516,8 +503,7 @@ export class GameRoomDO implements DurableObject {
   // ─── Team joined (called by auth.ts after registration) ───────────────────
 
   private async handleTeamJoined(body: Row): Promise<Response> {
-    const team = await this.ensureTeam(await this.state(), body.teamId)
-    if (team) this.broadcast({ type: 'TEAM_JOINED', team })
+    await this.ensureTeam(await this.state(), body.teamId)
     return jsonRes({ ok: true })
   }
 
@@ -539,7 +525,7 @@ export class GameRoomDO implements DurableObject {
 
     this.hot = null
     const updated = (await this.state()).batches.get(batchId)
-    if (updated) this.broadcast({ type: 'BATCH_UPDATED', batch: batchInfo(updated) })
+    if (updated) this.deferBroadcast({ type: 'BATCH_UPDATED', batch: batchInfo(updated) })
     return jsonRes({ ok: true })
   }
 
@@ -562,7 +548,7 @@ export class GameRoomDO implements DurableObject {
 
     this.hot = null
     const updated = (await this.state()).batches.get(batchId)
-    if (updated) this.broadcast({ type: 'BATCH_UPDATED', batch: batchInfo(updated) })
+    if (updated) this.deferBroadcast({ type: 'BATCH_UPDATED', batch: batchInfo(updated) })
     return jsonRes({ ok: true })
   }
 
@@ -703,7 +689,7 @@ export class GameRoomDO implements DurableObject {
       }))
 
     const summary: BatchSummary = { batchId, results, deltas, solutions }
-    this.broadcast({ type: 'BATCH_SETTLED', batchId, summary, teams })
+    this.deferBroadcast({ type: 'BATCH_SETTLED', batchId, summary })
 
     return jsonRes({ ok: true })
   }
@@ -738,8 +724,7 @@ export class GameRoomDO implements DurableObject {
     ])
 
     this.hot = null
-    const teams = await getAllTeams(this.env.DB)
-    this.broadcast({ type: 'BATCH_REOPENED', batchId, teams })
+    this.deferBroadcast({ type: 'BATCH_REOPENED', batchId })
 
     return jsonRes({ ok: true })
   }
@@ -771,7 +756,7 @@ export class GameRoomDO implements DurableObject {
       totalScore: r.total_score,
     }))
 
-    this.broadcast({ type: 'GAME_ENDED', leaderboard })
+    this.deferBroadcast({ type: 'GAME_ENDED', leaderboard })
     return jsonRes({ ok: true })
   }
 
@@ -790,12 +775,9 @@ export class GameRoomDO implements DurableObject {
     this.hot = null
 
     this.broadcast({ type: 'GAME_RESET' })
-    for (const sockets of this.connections.values()) {
-      for (const ws of sockets) {
-        try { ws.close(4000, 'Game reset') } catch { /* already closed */ }
-      }
+    for (const ws of this.ctx.getWebSockets()) {
+      try { ws.close(4000, 'Game reset') } catch { /* already closed */ }
     }
-    this.connections.clear()
     return jsonRes({ ok: true })
   }
 
@@ -831,18 +813,7 @@ export class GameRoomDO implements DurableObject {
     // CASCADE deletes members, submissions, votes, transactions
     await this.env.DB.prepare('DELETE FROM teams WHERE id = ?').bind(teamId).run()
     this.hot = null
-
     this.kickTeam(teamId, 'Team removed')
-
-    // Broadcast updated team list via FULL_STATE to each connected team
-    for (const [tid, socketSet] of this.connections) {
-      const state = await this.buildGameState(tid)
-      const msg = JSON.stringify({ type: 'FULL_STATE', state } satisfies ServerMessage)
-      for (const ws of socketSet) {
-        try { ws.send(msg) } catch { /* ignore */ }
-      }
-    }
-
     return jsonRes({ ok: true })
   }
 
@@ -853,15 +824,14 @@ export class GameRoomDO implements DurableObject {
     const res = await this.env.DB.prepare('UPDATE teams SET token_hash = NULL WHERE id = ?').bind(teamId).run()
     if (res.meta.changes !== 1) return jsonRes({ error: 'Team not found' }, 404)
 
-    if (this.kickTeam(teamId, 'Login reset by host')) await this.markOffline(teamId)
+    this.kickTeam(teamId, 'Login reset by host')
     return jsonRes({ ok: true })
   }
 
   /** Closes the team's sockets with 4001, which tells clients to sign out and not reconnect. */
   private kickTeam(teamId: string, reason: string): boolean {
-    const sockets = this.connections.get(teamId)
-    if (!sockets) return false
-    this.connections.delete(teamId)
+    const sockets = this.ctx.getWebSockets(teamId)
+    if (sockets.length === 0) return false
     for (const ws of sockets) {
       try { ws.close(4001, reason) } catch { /* already closed */ }
     }
@@ -869,23 +839,23 @@ export class GameRoomDO implements DurableObject {
   }
 
   // ─── Broadcast helpers ────────────────────────────────────────────────────
+  // Room-wide sends run after the mutation returns so 1k sockets don't block the queue.
 
-  private broadcast(message: ServerMessage) {
+  private sendToTeam(teamId: string, message: ServerMessage) {
     const data = JSON.stringify(message)
-    for (const sockets of this.connections.values()) {
-      for (const ws of sockets) {
-        try { ws.send(data) } catch { /* closed */ }
-      }
+    for (const ws of this.ctx.getWebSockets(teamId)) {
+      try { ws.send(data) } catch { /* closed */ }
     }
   }
 
-  private broadcastExcept(message: ServerMessage, excludeTeamIds: Set<string>) {
+  private broadcast(message: ServerMessage) {
     const data = JSON.stringify(message)
-    for (const [teamId, sockets] of this.connections) {
-      if (excludeTeamIds.has(teamId)) continue
-      for (const ws of sockets) {
-        try { ws.send(data) } catch { /* closed */ }
-      }
+    for (const ws of this.ctx.getWebSockets()) {
+      try { ws.send(data) } catch { /* closed */ }
     }
+  }
+
+  private deferBroadcast(message: ServerMessage) {
+    this.ctx.waitUntil(Promise.resolve().then(() => this.broadcast(message)))
   }
 }

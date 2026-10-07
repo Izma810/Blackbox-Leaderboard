@@ -16,10 +16,16 @@ new_sqlite_classes = ["GameRoomDO"]
 [[d1_databases]]
 binding = "DB"
 database_name = "blackbox-leaderboard"
-database_id = "03ab4c7d-13c2-42f9-ae81-2e07e5907ad3"
+database_id = "9049fdfc-f0e4-460f-bb41-31346b4ce89d"
 
 [vars]
 ENVIRONMENT = "production"
+
+[observability]
+enabled = true
+
+[observability.traces]
+enabled = true
 
 # Static assets: the Vite plugin populates assets.directory from the client build.
 # run_worker_first ensures /api/* requests always hit the Worker.

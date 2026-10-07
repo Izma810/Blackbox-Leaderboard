@@ -1,8 +1,19 @@
 import { Hono } from 'hono'
 import type { Env } from '../types'
-import { getTeamIdByToken, bearerToken } from '../db/d1'
+import { getTeamIdByToken, bearerToken, getSubmissionsForPuzzle, type SubmissionRow } from '../db/d1'
 
 const game = new Hono<{ Bindings: Env }>()
+
+const SUBS_CACHE_MS = 1000
+const subsCache = new Map<string, { at: number; rows: SubmissionRow[] }>()
+
+async function cachedSubmissions(db: D1Database, puzzleId: string): Promise<SubmissionRow[]> {
+  const hit = subsCache.get(puzzleId)
+  if (hit && Date.now() - hit.at < SUBS_CACHE_MS) return hit.rows
+  const rows = await getSubmissionsForPuzzle(db, puzzleId)
+  subsCache.set(puzzleId, { at: Date.now(), rows })
+  return rows
+}
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 
@@ -86,7 +97,7 @@ game.get('/puzzles/:id', async (c) => {
     return c.json({ error: 'Puzzle not available yet' }, 403)
   }
 
-  const { getSubmissionsForPuzzle, getTeamVotesForPuzzle, getHintsBought, buildPublicSubmission } = await import('../db/d1')
+  const { getTeamVotesForPuzzle, getHintsBought, buildPublicSubmission } = await import('../db/d1')
   const settled = batch.status === 'settled'
   const cfg = await c.env.DB
     .prepare('SELECT anonymous_voting FROM game_config WHERE id = 1')
@@ -94,7 +105,7 @@ game.get('/puzzles/:id', async (c) => {
   const anonymous = cfg?.anonymous_voting === 1
 
   const [submissionRows, myVotes] = await Promise.all([
-    getSubmissionsForPuzzle(c.env.DB, puzzleId),
+    cachedSubmissions(c.env.DB, puzzleId),
     getTeamVotesForPuzzle(c.env.DB, puzzleId, teamId),
   ])
   const submissions = submissionRows.map((row, i) => buildPublicSubmission(row, anonymous, i, settled))

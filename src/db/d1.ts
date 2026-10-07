@@ -163,6 +163,18 @@ export async function getSubmissionsForBatch(
   return res.results
 }
 
+/** A, B, … Z, AA — does not stop at 26 teams. */
+function submissionLabel(idx: number): string {
+  let n = idx + 1
+  let s = ''
+  while (n > 0) {
+    n--
+    s = String.fromCharCode(65 + (n % 26)) + s
+    n = Math.floor(n / 26)
+  }
+  return s
+}
+
 export function buildPublicSubmission(
   row: SubmissionRow,
   anonymousVoting: boolean,
@@ -172,7 +184,7 @@ export function buildPublicSubmission(
   return {
     id:          row.id,
     teamId:      row.team_id,
-    label:       anonymousVoting ? String.fromCharCode(65 + labelIdx) : row.team_name,
+    label:       anonymousVoting ? submissionLabel(labelIdx) : row.team_name,
     expr:        row.expr,
     ups:         row.ups ?? 0,
     downs:       row.downs ?? 0,

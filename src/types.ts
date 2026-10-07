@@ -168,8 +168,8 @@ export type ServerMessage =
   | { type: 'BATCH_UPDATED';   batch: BatchInfo }
   | { type: 'SUBMISSION_MADE'; puzzleId: string; submission: PublicSubmission }
   | { type: 'VOTE_CAST';       puzzleId: string; submissionId: string; ups: number; downs: number }
-  | { type: 'BATCH_SETTLED';   batchId: BatchId; summary: BatchSummary; teams: TeamInfo[] }
-  | { type: 'BATCH_REOPENED';  batchId: BatchId; teams: TeamInfo[] }
+  | { type: 'BATCH_SETTLED';   batchId: BatchId; summary: BatchSummary }
+  | { type: 'BATCH_REOPENED';  batchId: BatchId }
   | { type: 'GAME_ENDED';      leaderboard: LeaderboardEntry[] }
   | { type: 'GAME_RESET' }
   | { type: 'ERROR';           message: string }

@@ -1,15 +1,15 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { HOSTELS, validateRegistration, type MemberInput } from '../../../shared/team'
 import { setSession } from '../lib/session'
+import TeammateLink from '../components/TeammateLink'
 import type { TeamInfo } from '../types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface RegisterResult { loginId: string; passcode: string; token: string; team: TeamInfo }
-interface LoginResult    { token: string; team: TeamInfo }
+interface SessionResult { token: string; team: TeamInfo }
 
-type Tab = 'register' | 'login'
+type Tab = 'register' | 'reclaim'
 
 // ─── Member input block ───────────────────────────────────────────────────────
 
@@ -56,51 +56,25 @@ function MemberBlock({ index, value, onChange }: {
   )
 }
 
-// ─── Credentials screen (shown once after registration) ───────────────────────
+// ─── Teammate link screen (after registering or reclaiming) ───────────────────
 
-function CredentialsScreen({ loginId, passcode, onDone }: {
-  loginId: string; passcode: string; onDone: () => void
-}) {
-  const [copied, setCopied] = useState(false)
-  const text = `WhackAModel login\nTeam ID: ${loginId}\nPasscode: ${passcode}`
-
-  function copy() {
-    navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
-  }
-
+function TeammateLinkScreen({ token, title, onDone }: { token: string; title: string; onDone: () => void }) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-paper px-4">
       <div className="card-pop flex w-full max-w-md flex-col gap-6">
         <div className="text-center">
           <div className="mb-2 text-4xl">🎉</div>
-          <h1 className="text-2xl font-bold">Team registered!</h1>
+          <h1 className="text-2xl font-bold">{title}</h1>
           <p className="mt-2 text-sm text-ink-3">
-            Save these credentials. The passcode is shown <strong>only once</strong> and cannot be recovered.
+            This laptop is signed in. Now sign in your teammate&rsquo;s laptop with the link below.
+            You can copy it again later from the game screen.
           </p>
         </div>
 
-        <div className="flex flex-col gap-3 rounded-xl bg-ink p-5 text-white">
-          <div>
-            <div className="eyebrow mb-1 text-white/50">Team Login ID</div>
-            <div className="tabular text-2xl font-bold tracking-widest">{loginId}</div>
-          </div>
-          <div>
-            <div className="eyebrow mb-1 text-white/50">Passcode</div>
-            <div className="tabular text-2xl font-bold tracking-widest">{passcode}</div>
-          </div>
-        </div>
-
-        <p className="text-center text-xs text-ink-4">
-          Both teammates need these. Share them on WhatsApp, write them down — whatever works.
-          Both laptops log in with the same ID and passcode.
-        </p>
-
-        <button onClick={copy} className="btn-secondary">
-          {copied ? '✓ Copied!' : 'Copy credentials'}
-        </button>
+        <TeammateLink token={token} />
 
         <button onClick={onDone} className="btn-primary">
-          I've saved these — let's play →
+          Let&rsquo;s play →
         </button>
       </div>
     </div>
@@ -111,7 +85,8 @@ function CredentialsScreen({ loginId, passcode, onDone }: {
 
 export default function Home() {
   const navigate = useNavigate()
-  const [tab, setTab] = useState<Tab>('register')
+  const signedOut = (useLocation().state as { signedOut?: string } | null)?.signedOut
+  const [tab, setTab] = useState<Tab>(signedOut ? 'reclaim' : 'register')
 
   // Registration state
   const [teamName, setTeamName] = useState('')
@@ -121,13 +96,13 @@ export default function Home() {
   ])
   const [regError,  setRegError]  = useState('')
   const [regBusy,   setRegBusy]   = useState(false)
-  const [creds,     setCreds]     = useState<{ loginId: string; passcode: string } | null>(null)
+  const [done,      setDone]      = useState<{ token: string; title: string } | null>(null)
 
-  // Login state
-  const [loginId,    setLoginId]    = useState('')
-  const [passcode,   setPasscode]   = useState('')
-  const [loginError, setLoginError] = useState('')
-  const [loginBusy,  setLoginBusy]  = useState(false)
+  // Reclaim state
+  const [claimName,  setClaimName]  = useState('')
+  const [claimEntry, setClaimEntry] = useState('')
+  const [claimError, setClaimError] = useState('')
+  const [claimBusy,  setClaimBusy]  = useState(false)
 
   async function handleRegister(e: React.FormEvent) {
     e.preventDefault()
@@ -142,13 +117,13 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ teamName, members }),
       })
-      const data = await res.json() as (RegisterResult & { error?: string; errors?: { message: string }[] })
+      const data = await res.json() as (SessionResult & { error?: string; errors?: { message: string }[] })
       if (!res.ok) {
         setRegError(data.error ?? data.errors?.[0]?.message ?? 'Registration failed')
         return
       }
       setSession(data.token, data.team)
-      setCreds({ loginId: data.loginId, passcode: data.passcode })
+      setDone({ token: data.token, title: 'Team registered!' })
     } catch {
       setRegError('Network error. Check your connection.')
     } finally {
@@ -156,29 +131,29 @@ export default function Home() {
     }
   }
 
-  async function handleLogin(e: React.FormEvent) {
+  async function handleClaim(e: React.FormEvent) {
     e.preventDefault()
-    setLoginError('')
-    setLoginBusy(true)
+    setClaimError('')
+    setClaimBusy(true)
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch('/api/auth/claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ loginId: loginId.trim().toUpperCase(), passcode: passcode.trim().toUpperCase() }),
+        body: JSON.stringify({ teamName: claimName, entryNumber: claimEntry }),
       })
-      const data = await res.json() as (LoginResult & { error?: string })
-      if (!res.ok) { setLoginError(data.error ?? 'Login failed'); return }
+      const data = await res.json() as (SessionResult & { error?: string })
+      if (!res.ok) { setClaimError(data.error ?? 'Could not reclaim the team'); return }
       setSession(data.token, data.team)
-      navigate('/play')
+      setDone({ token: data.token, title: 'Welcome back!' })
     } catch {
-      setLoginError('Network error. Check your connection.')
+      setClaimError('Network error. Check your connection.')
     } finally {
-      setLoginBusy(false)
+      setClaimBusy(false)
     }
   }
 
-  if (creds) {
-    return <CredentialsScreen {...creds} onDone={() => navigate('/play')} />
+  if (done) {
+    return <TeammateLinkScreen {...done} onDone={() => navigate('/play')} />
   }
 
   return (
@@ -224,7 +199,7 @@ export default function Home() {
         <div className="card-pop flex flex-col gap-5 sm:p-8">
           {/* Tabs */}
           <div className="flex rounded-xl bg-ink/5 p-1" role="tablist">
-            {(['register', 'login'] as Tab[]).map((t) => (
+            {(['register', 'reclaim'] as Tab[]).map((t) => (
               <button
                 key={t}
                 role="tab"
@@ -234,10 +209,12 @@ export default function Home() {
                   tab === t ? 'bg-white text-ink shadow-soft' : 'text-ink-3 hover:text-ink'
                 }`}
               >
-                {t === 'register' ? 'Register team' : 'Log in'}
+                {t === 'register' ? 'Register team' : 'Reclaim team'}
               </button>
             ))}
           </div>
+
+          {signedOut && <div className="alert-error" role="alert">{signedOut}</div>}
 
           {tab === 'register' ? (
             <form onSubmit={handleRegister} className="flex flex-col gap-4">
@@ -264,40 +241,39 @@ export default function Home() {
               </button>
             </form>
           ) : (
-            <form onSubmit={handleLogin} className="flex flex-col gap-4">
+            <form onSubmit={handleClaim} className="flex flex-col gap-4">
+              <p className="text-sm text-ink-3">
+                Already registered? To sign in your second laptop, open the <strong>teammate link</strong> from
+                the first one. If neither laptop is signed in any more, ask the host to reset your team&rsquo;s
+                login, then reclaim it here.
+              </p>
               <label className="flex flex-col gap-1.5">
-                <span className="label">Team login ID</span>
+                <span className="label">Team name</span>
                 <input
-                  className="input tabular tracking-widest font-semibold"
-                  placeholder="WM-XXXXX"
-                  value={loginId}
-                  onChange={(e) => setLoginId(e.target.value.toUpperCase())}
-                  autoComplete="username"
-                  spellCheck={false}
+                  className="input"
+                  value={claimName}
+                  onChange={(e) => setClaimName(e.target.value)}
+                  maxLength={30}
                 />
               </label>
               <label className="flex flex-col gap-1.5">
-                <span className="label">Passcode</span>
+                <span className="label">Entry number of either member</span>
                 <input
-                  className="input tabular tracking-widest font-semibold"
-                  placeholder="XXXXXX"
-                  value={passcode}
-                  onChange={(e) => setPasscode(e.target.value.toUpperCase())}
-                  autoComplete="current-password"
+                  className="input tabular tracking-wider"
+                  placeholder="e.g. 2023CS10123"
+                  value={claimEntry}
+                  onChange={(e) => setClaimEntry(e.target.value.toUpperCase())}
+                  maxLength={11}
                   spellCheck={false}
                 />
               </label>
 
-              {loginError && <div className="alert-error" role="alert">{loginError}</div>}
+              {claimError && <div className="alert-error" role="alert">{claimError}</div>}
 
               <button type="submit" className="btn-primary w-full py-3.5"
-                disabled={loginBusy || !loginId.trim() || !passcode.trim()}>
-                {loginBusy ? 'Logging in…' : 'Log in →'}
+                disabled={claimBusy || !claimName.trim() || !claimEntry.trim()}>
+                {claimBusy ? 'Reclaiming…' : 'Reclaim team →'}
               </button>
-
-              <p className="text-center text-xs text-ink-4">
-                Your login ID and passcode were shown once when your team registered.
-              </p>
             </form>
           )}
         </div>

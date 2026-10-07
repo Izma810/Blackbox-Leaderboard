@@ -65,6 +65,7 @@ export class GameRoomDO implements DurableObject {
       case 'admin/reset':         return this.serialized(() => this.handleReset())
       case 'admin/config':        return this.serialized(() => this.handleUpdateConfig(body))
       case 'admin/remove-team':   return this.serialized(() => this.handleRemoveTeam(body))
+      case 'admin/reset-login':   return this.serialized(() => this.handleResetLogin(body))
       default:                    return new Response('Not found', { status: 404 })
     }
   }
@@ -91,9 +92,11 @@ export class GameRoomDO implements DurableObject {
       } catch { /* ignore */ }
     })
 
+    // A kicked team's set is detached from `connections` up front, and the team may
+    // already have a fresh set by the time these fire, so only clean up our own.
     server.addEventListener('close', () => {
       sockets.delete(server)
-      if (sockets.size === 0) {
+      if (sockets.size === 0 && this.connections.get(teamId) === sockets) {
         this.connections.delete(teamId)
         this.ctx.waitUntil(this.onTeamOffline(teamId))
       }
@@ -101,7 +104,7 @@ export class GameRoomDO implements DurableObject {
 
     server.addEventListener('error', () => {
       sockets.delete(server)
-      if (sockets.size === 0) this.connections.delete(teamId)
+      if (sockets.size === 0 && this.connections.get(teamId) === sockets) this.connections.delete(teamId)
     })
 
     this.ctx.waitUntil(this.initConnection(server, teamId, wasOnline))
@@ -751,16 +754,8 @@ export class GameRoomDO implements DurableObject {
     // CASCADE deletes members, submissions, votes, transactions
     await this.env.DB.prepare('DELETE FROM teams WHERE id = ?').bind(teamId).run()
 
-    // Kick their sockets
-    const sockets = this.connections.get(teamId)
-    if (sockets) {
-      for (const ws of sockets) {
-        try { ws.close(4001, 'Team removed') } catch { /* already closed */ }
-      }
-      this.connections.delete(teamId)
-    }
+    this.kickTeam(teamId, 'Team removed')
 
-    const teams = await getAllTeams(this.env.DB)
     // Broadcast updated team list via FULL_STATE to each connected team
     for (const [tid, socketSet] of this.connections) {
       const state = await this.buildGameState(tid)
@@ -771,6 +766,28 @@ export class GameRoomDO implements DurableObject {
     }
 
     return jsonRes({ ok: true })
+  }
+
+  // ─── Admin: reset login ───────────────────────────────────────────────────
+
+  private async handleResetLogin(body: Row): Promise<Response> {
+    const { teamId } = body as { teamId: string }
+    const res = await this.env.DB.prepare('UPDATE teams SET token_hash = NULL WHERE id = ?').bind(teamId).run()
+    if (res.meta.changes !== 1) return jsonRes({ error: 'Team not found' }, 404)
+
+    if (this.kickTeam(teamId, 'Login reset by host')) await this.onTeamOffline(teamId)
+    return jsonRes({ ok: true })
+  }
+
+  /** Closes the team's sockets with 4001, which tells clients to sign out and not reconnect. */
+  private kickTeam(teamId: string, reason: string): boolean {
+    const sockets = this.connections.get(teamId)
+    if (!sockets) return false
+    this.connections.delete(teamId)
+    for (const ws of sockets) {
+      try { ws.close(4001, reason) } catch { /* already closed */ }
+    }
+    return true
   }
 
   // ─── Broadcast helpers ────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ import { getToken } from '../lib/session'
 interface UseWebSocketOptions {
   onMessage: (msg: ServerMessage) => void
   onOpen?:   () => void
-  onClose?:  () => void
+  onClose?:  (code: number) => void
 }
 
 export function useWebSocket({ onMessage, onOpen, onClose }: UseWebSocketOptions) {
@@ -55,10 +55,10 @@ export function useWebSocket({ onMessage, onOpen, onClose }: UseWebSocketOptions
     ws.onerror = () => { /* onerror always followed by onclose */ }
 
     ws.onclose = (evt) => {
-      onCloseRef.current?.()
+      onCloseRef.current?.(evt.code)
       wsRef.current = null
       if (unmounted.current) return
-      // 4000 = game reset (don't retry), 4001 = auth error (don't retry)
+      // 4000 = game reset (don't retry), 4001 = team removed or login reset (don't retry)
       if (evt.code === 4000 || evt.code === 4001) return
       if (retryCount.current >= MAX_RETRIES) return
 

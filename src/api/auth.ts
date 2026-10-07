@@ -1,14 +1,16 @@
+/**
+ * Team auth. Registering gives the team a secret token; holding it is being the
+ * team. The second laptop gets it through the teammate link. If both laptops
+ * lose it, the host resets the team's login and the team claims it back with its
+ * name and a member's entry number.
+ */
 import { Hono } from 'hono'
 import type { Env } from '../types'
 import { validateRegistration, normalizeEntryNumber } from '../../shared/team'
-import {
-  hashPasscode, verifyPasscode, createToken, generateLoginId, generatePasscode,
-} from '../lib/crypto'
-import { getTeamById, getTeamByLoginId } from '../db/d1'
+import { generateToken, hashToken } from '../lib/crypto'
+import { getTeamById, getTeamIdByToken, bearerToken } from '../db/d1'
 
 const auth = new Hono<{ Bindings: Env }>()
-
-const SECRET = (env: Env) => env.SESSION_SECRET || 'dev_secret_change_me_in_production'
 
 // ─── POST /api/auth/register ──────────────────────────────────────────────────
 
@@ -40,42 +42,27 @@ auth.post('/register', async (c) => {
     .first<{ starting_wallet: number }>()
   const startingWallet = cfgRow?.starting_wallet ?? 1000
 
-  const loginId = generateLoginId()
-  const passcode = generatePasscode()
-  const { hash, salt } = await hashPasscode(passcode)
+  const token  = generateToken()
   const teamId = crypto.randomUUID()
   const now    = Date.now()
 
   await c.env.DB.batch([
     c.env.DB.prepare(`
-      INSERT INTO teams (id, login_id, passcode_hash, passcode_salt, name, name_lower, wallet, total_score, is_connected, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
-    `).bind(teamId, loginId, hash, salt, teamName, nameLower, startingWallet, now),
-    c.env.DB.prepare(
-      'INSERT INTO team_members (id, team_id, name, entry_number, hostel, slot) VALUES (?, ?, ?, ?, ?, 1)',
-    ).bind(
-      crypto.randomUUID(), teamId,
-      (members[0].name as string).trim(),
-      normalizeEntryNumber(members[0].entryNumber),
-      members[0].hostel,
-    ),
-    c.env.DB.prepare(
-      'INSERT INTO team_members (id, team_id, name, entry_number, hostel, slot) VALUES (?, ?, ?, ?, ?, 2)',
-    ).bind(
-      crypto.randomUUID(), teamId,
-      (members[1].name as string).trim(),
-      normalizeEntryNumber(members[1].entryNumber),
-      members[1].hostel,
+      INSERT INTO teams (id, token_hash, name, name_lower, wallet, total_score, is_connected, created_at)
+      VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+    `).bind(teamId, await hashToken(token), teamName, nameLower, startingWallet, now),
+    ...members.map((m, i) =>
+      c.env.DB.prepare(
+        'INSERT INTO team_members (id, team_id, name, entry_number, hostel, slot) VALUES (?, ?, ?, ?, ?, ?)',
+      ).bind(crypto.randomUUID(), teamId, (m.name as string).trim(), normalizeEntryNumber(m.entryNumber), m.hostel, i + 1),
     ),
   ])
 
-  const team  = await getTeamById(c.env.DB, teamId)
-  const token = await createToken(teamId, SECRET(c.env))
+  const team = await getTeamById(c.env.DB, teamId)
 
   // Notify DO so it broadcasts TEAM_JOINED to connected clients
   try {
-    const doId = c.env.GAME_ROOM.idFromName('main')
-    const stub = c.env.GAME_ROOM.get(doId)
+    const stub = c.env.GAME_ROOM.get(c.env.GAME_ROOM.idFromName('main'))
     c.executionCtx.waitUntil(
       stub.fetch(new Request('https://do-internal/team-joined', {
         method: 'POST',
@@ -85,36 +72,15 @@ auth.post('/register', async (c) => {
     )
   } catch { /* non-critical */ }
 
-  return c.json({ loginId, passcode, token, team }, 201)
-})
-
-// ─── POST /api/auth/login ─────────────────────────────────────────────────────
-
-auth.post('/login', async (c) => {
-  const body = await c.req.json<{ loginId: string; passcode: string }>().catch(() => null)
-  if (!body?.loginId || !body.passcode) {
-    return c.json({ error: 'loginId and passcode are required' }, 400)
-  }
-
-  const row = await getTeamByLoginId(c.env.DB, body.loginId.trim().toUpperCase())
-  if (!row) return c.json({ error: 'Invalid login ID or passcode' }, 401)
-
-  const valid = await verifyPasscode(body.passcode.trim().toUpperCase(), row.passcodeHash, row.passcodeSalt)
-  if (!valid) return c.json({ error: 'Invalid login ID or passcode' }, 401)
-
-  const token = await createToken(row.id, SECRET(c.env))
-  return c.json({ token, team: { id: row.id, loginId: row.loginId, name: row.name, members: row.members, wallet: row.wallet, totalScore: row.totalScore, isConnected: row.isConnected } })
+  return c.json({ token, team }, 201)
 })
 
 // ─── GET /api/auth/me ─────────────────────────────────────────────────────────
+// Also how the second laptop signs in: it opens the teammate link, which carries the token.
 
 auth.get('/me', async (c) => {
-  const token = (c.req.header('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
-  if (!token) return c.json({ error: 'Unauthorized' }, 401)
-
-  const { verifyToken } = await import('../lib/crypto')
-  const teamId = await verifyToken(token, SECRET(c.env))
-  if (!teamId) return c.json({ error: 'Invalid or expired token' }, 401)
+  const teamId = await getTeamIdByToken(c.env.DB, bearerToken(c.req.header('Authorization')))
+  if (!teamId) return c.json({ error: 'This login is not valid any more' }, 401)
 
   const team = await getTeamById(c.env.DB, teamId)
   if (!team) return c.json({ error: 'Team not found' }, 404)
@@ -122,5 +88,33 @@ auth.get('/me', async (c) => {
   return c.json({ team })
 })
 
+// ─── POST /api/auth/claim ─────────────────────────────────────────────────────
+// Only works for a team whose login the host has just reset.
+
+auth.post('/claim', async (c) => {
+  const body = await c.req.json<{ teamName?: unknown; entryNumber?: unknown }>().catch(() => null)
+  const teamName    = typeof body?.teamName === 'string' ? body.teamName.trim().toLowerCase() : ''
+  const entryNumber = typeof body?.entryNumber === 'string' ? normalizeEntryNumber(body.entryNumber) : ''
+  if (!teamName || !entryNumber) return c.json({ error: 'Team name and an entry number are required' }, 400)
+
+  const NOT_CLAIMABLE = {
+    error: "That team can't be claimed. Check the name and entry number, and ask the host to reset your team's login first.",
+  }
+
+  const row = await c.env.DB.prepare(`
+    SELECT t.id, t.token_hash FROM teams t
+    JOIN team_members m ON m.team_id = t.id
+    WHERE t.name_lower = ? AND m.entry_number = ?
+  `).bind(teamName, entryNumber).first<{ id: string; token_hash: string | null }>()
+  if (!row || row.token_hash !== null) return c.json(NOT_CLAIMABLE, 409)
+
+  const token = generateToken()
+  const claimed = await c.env.DB
+    .prepare('UPDATE teams SET token_hash = ? WHERE id = ? AND token_hash IS NULL')
+    .bind(await hashToken(token), row.id).run()
+  if (claimed.meta.changes !== 1) return c.json(NOT_CLAIMABLE, 409)
+
+  return c.json({ token, team: await getTeamById(c.env.DB, row.id) })
+})
+
 export { auth as authRouter }
-export { SECRET }

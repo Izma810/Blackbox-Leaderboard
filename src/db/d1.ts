@@ -6,6 +6,7 @@ import type {
   GameConfig, TeamInfo, TeamMemberInfo, BatchInfo, BatchStatus,
   BatchId, PuzzleInfo, PublicSubmission, VoteCount, VoteType,
 } from '../types'
+import { hashToken } from '../lib/crypto'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
@@ -37,7 +38,6 @@ export async function getConfig(db: D1Database): Promise<GameConfig> {
 function rowToTeamInfo(r: Row, members: TeamMemberInfo[]): TeamInfo {
   return {
     id:          r.id,
-    loginId:     r.login_id,
     name:        r.name,
     members,
     wallet:      r.wallet,
@@ -68,11 +68,17 @@ export async function getTeamById(db: D1Database, id: string): Promise<TeamInfo 
   return rowToTeamInfo(r, members)
 }
 
-export async function getTeamByLoginId(db: D1Database, loginId: string): Promise<(TeamInfo & { passcodeHash: string; passcodeSalt: string }) | null> {
-  const r = await db.prepare('SELECT * FROM teams WHERE login_id = ?').bind(loginId).first<Row>()
-  if (!r) return null
-  const members = await getMembersForTeam(db, r.id)
-  return { ...rowToTeamInfo(r, members), passcodeHash: r.passcode_hash, passcodeSalt: r.passcode_salt }
+/** The team a session token belongs to, or null if it's missing, unknown or was reset. */
+export async function getTeamIdByToken(db: D1Database, token: string | null | undefined): Promise<string | null> {
+  if (!token) return null
+  const r = await db
+    .prepare('SELECT id FROM teams WHERE token_hash = ?')
+    .bind(await hashToken(token)).first<{ id: string }>()
+  return r?.id ?? null
+}
+
+export function bearerToken(authHeader: string | undefined): string {
+  return (authHeader ?? '').replace(/^Bearer\s+/i, '').trim()
 }
 
 // ─── batches ──────────────────────────────────────────────────────────────────

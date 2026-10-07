@@ -30,6 +30,11 @@ export function isLoggedIn(): boolean {
   return !!getToken()
 }
 
+/** Opening this signs a laptop in as the team. The token sits in the #fragment, which browsers never send to the server. */
+export function teammateLink(token: string): string {
+  return `${window.location.origin}/join#${token}`
+}
+
 /** fetch() wrapper that injects the Authorization header and handles 401. */
 export async function authFetch(
   url: string,

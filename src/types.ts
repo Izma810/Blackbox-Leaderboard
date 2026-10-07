@@ -28,7 +28,6 @@ export interface TeamMemberInfo {
 
 export interface TeamInfo {
   id:          string
-  loginId:     string
   name:        string
   members:     TeamMemberInfo[]
   wallet:      number
@@ -183,5 +182,4 @@ export interface Env {
   GAME_ROOM:       DurableObjectNamespace
   ENVIRONMENT:     string
   ADMIN_PASSWORD:  string
-  SESSION_SECRET:  string
 }

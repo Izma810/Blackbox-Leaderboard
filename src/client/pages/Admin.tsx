@@ -14,7 +14,7 @@ interface BatchAdminInfo {
 }
 interface MemberAdmin { name: string; entryNumber: string; hostel: string; slot: number }
 interface TeamAdmin {
-  id: string; loginId: string; name: string; wallet: number; totalScore: number; isConnected: boolean
+  id: string; name: string; wallet: number; totalScore: number; isConnected: boolean; awaitingReclaim: boolean
   members: { name: string; hostel: string; slot: number }[]
   membersAdmin: MemberAdmin[]
 }
@@ -109,8 +109,6 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
   const [error,  setError]  = useState('')
   const [busy,   setBusy]   = useState<string | null>(null)
   const [toast,  setToast]  = useState('')
-  const [newPasscode, setNewPasscode] = useState<{teamId: string; passcode: string} | null>(null)
-
   const auth = useCallback((init: RequestInit = {}) => ({
     ...init,
     headers: { 'Authorization': `Bearer ${password}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
@@ -147,15 +145,11 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
     finally { setBusy(null) }
   }
 
-  async function resetPasscode(teamId: string) {
-    setBusy('passcode-' + teamId)
-    try {
-      const res = await fetch(`/api/admin/teams/${teamId}/reset-passcode`, auth({ method: 'POST' }))
-      const data = await res.json() as { passcode?: string; error?: string }
-      if (!res.ok) { showToast(data.error ?? 'Error'); return }
-      setNewPasscode({ teamId, passcode: data.passcode! })
-    } catch { showToast('Network error') }
-    finally { setBusy(null) }
+  async function resetLogin(teamId: string, teamName: string) {
+    if (!confirm(`Reset the login for "${teamName}"?\n\nBoth of their laptops get signed out. They then reclaim the team on the home page with the team name and a member's entry number. Only do this when the team is standing with you.`)) return
+    if (await doAction(`/api/admin/teams/${teamId}/reset-login`)) {
+      showToast(`Login reset. Have "${teamName}" reclaim the team now.`)
+    }
   }
 
   if (!state) {
@@ -168,20 +162,6 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
       {toast && (
         <div className="fixed right-4 top-4 z-50 rounded-xl bg-ink px-4 py-3 text-sm text-white shadow-pop animate-slide-up">
           {toast}
-        </div>
-      )}
-
-      {/* New passcode modal */}
-      {newPasscode && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/50 p-4">
-          <div className="card-pop max-w-sm w-full flex flex-col gap-4">
-            <h3 className="font-bold text-lg">New passcode generated</h3>
-            <p className="text-sm text-ink-3">Share this with the team. It won't be shown again.</p>
-            <div className="rounded-xl bg-ink p-4 text-center font-display text-2xl font-bold tracking-widest text-white">
-              {newPasscode.passcode}
-            </div>
-            <button className="btn-primary" onClick={() => setNewPasscode(null)}>Done</button>
-          </div>
         </div>
       )}
 
@@ -318,7 +298,9 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
                           <span className={`h-2 w-2 rounded-full ${t.isConnected ? 'bg-up' : 'bg-line'}`} />
                           <span className="font-semibold">{t.name}</span>
                         </div>
-                        <div className="mt-0.5 font-mono text-xs text-ink-4">{t.loginId}</div>
+                        {t.awaitingReclaim && (
+                          <span className="chip chip-accent mt-1 text-xs">Login reset, waiting to reclaim</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         {t.membersAdmin.map((m, i) => (
@@ -331,9 +313,9 @@ function AdminPanel({ password, onLogout }: { password: string; onLogout: () => 
                       <td className="px-4 py-3 text-right">
                         <div className="flex justify-end gap-2">
                           <button className="btn-ghost px-2 py-1 text-xs"
-                            disabled={busy === 'passcode-' + t.id}
-                            onClick={() => resetPasscode(t.id)}>
-                            Reset passcode
+                            disabled={busy === `/api/admin/teams/${t.id}/reset-login`}
+                            onClick={() => resetLogin(t.id, t.name)}>
+                            Reset login
                           </button>
                           <button className="btn-ghost px-2 py-1 text-xs text-down"
                             disabled={busy === 'delete-' + t.id}

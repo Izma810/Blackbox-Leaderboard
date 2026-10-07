@@ -5,7 +5,8 @@ import type {
   PuzzleForPlayers, ImagePuzzleForPlayers, PublicSubmission, VoteType, BatchId, Verdict,
 } from '../types'
 import { useWebSocket }   from '../hooks/useWebSocket'
-import { getTeam, clearSession, authFetch } from '../lib/session'
+import { getTeam, getToken, clearSession, authFetch } from '../lib/session'
+import TeammateLink       from '../components/TeammateLink'
 import PuzzlePanel        from '../components/PuzzlePanel'
 import FormulaInput       from '../components/FormulaInput'
 import EntryFeed          from '../components/EntryFeed'
@@ -150,6 +151,7 @@ export default function Play() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showLeaderboard, setShowLeaderboard] = useState(false)
+  const [showTeammateLink, setShowTeammateLink] = useState(false)
   const [highlightSubId, setHighlightSubId] = useState<string | null>(null)
   const detailPuzzleRef = useRef<string | null>(null)
 
@@ -204,10 +206,30 @@ export default function Play() {
     }
   }, [navigate])
 
+  const signOut = useCallback((reason: string) => {
+    clearSession()
+    navigate('/', { replace: true, state: { signedOut: reason } })
+  }, [navigate])
+
+  const onSocketClose = useCallback((code: number) => {
+    dispatch({ type: 'CONNECTED', v: false })
+    if (code === 4001) {
+      signOut("This laptop was signed out because the host reset your team's login or removed your team.")
+      return
+    }
+    // A revoked token is refused before the socket opens, which looks like an
+    // ordinary dropped connection, so ask the server whether the login still works.
+    if (code !== 1000 && code !== 4000) {
+      authFetch('/api/auth/me').then((res) => {
+        if (res.status === 401) signOut("This laptop's login doesn't work any more. The host may have reset it.")
+      }).catch(() => { /* offline; the socket keeps retrying */ })
+    }
+  }, [signOut])
+
   useWebSocket({
     onMessage: handleMessage,
     onOpen:    () => dispatch({ type: 'CONNECTED', v: true }),
-    onClose:   () => dispatch({ type: 'CONNECTED', v: false }),
+    onClose:   onSocketClose,
   })
 
   // ─── Load puzzle detail ─────────────────────────────────────────────────
@@ -337,7 +359,13 @@ export default function Play() {
           <button className="btn-ghost px-2 py-1 text-xs" onClick={() => setShowLeaderboard(true)}>
             Standings
           </button>
-          <button className="btn-ghost px-2 py-1 text-xs" onClick={() => { clearSession(); navigate('/') }}>
+          <button className="btn-ghost px-2 py-1 text-xs" onClick={() => setShowTeammateLink(true)}>
+            Teammate link
+          </button>
+          <button className="btn-ghost px-2 py-1 text-xs" onClick={() => {
+            if (!confirm('Log out this laptop? To sign back in, open the teammate link from your other laptop, or ask the host to reset your login.')) return
+            clearSession(); navigate('/')
+          }}>
             Log out
           </button>
         </div>
@@ -550,6 +578,18 @@ export default function Play() {
           myTeamId={myTeamId ?? ''}
           onClose={() => setShowLeaderboard(false)}
         />
+      )}
+
+      {showTeammateLink && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-ink/40 p-4 pt-[12vh] animate-fade-in"
+          onClick={() => setShowTeammateLink(false)}>
+          <div role="dialog" aria-modal aria-label="Teammate link"
+            className="card-pop flex w-full max-w-md flex-col gap-4 animate-pop-in" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold">Sign in your teammate&rsquo;s laptop</h3>
+            <TeammateLink token={getToken() ?? ''} />
+            <button className="btn-secondary" onClick={() => setShowTeammateLink(false)} autoFocus>Close</button>
+          </div>
+        </div>
       )}
     </div>
   )

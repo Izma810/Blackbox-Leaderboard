@@ -12,8 +12,9 @@ You are shown a dataset — columns of numbers (`x1`, `x2`, …) and an output c
 
 - The game is played in **2-person teams**. Both members share one account.
 - At registration each member provides their **name**, **entry number**, and **hostel**.
-- The server generates a **Team Login ID** (format `WM-XXXXX`) and a **6-character passcode**. These are shown **once only** — save them.
-- Both teammates log in from their own laptops using the same ID and passcode.
+- There are no passwords. The laptop you register on is signed in automatically and stays signed in (the login lives in that browser).
+- To sign in your teammate's laptop, open the **teammate link** on it. It's shown right after registering, and any time from the **Teammate link** button on the game screen. Anyone with the link can play as your team, so send it only to your teammate.
+- If neither laptop is signed in any more (cleared browser, logged out, new laptop), ask the host to **reset your team's login**. Then use **Reclaim team** on the home page with your team name and either member's entry number. A reset also signs out every laptop still holding the old login, so it's also the fix if your link leaked.
 - Entry numbers are unique — the same person cannot be on two teams.
 
 ---

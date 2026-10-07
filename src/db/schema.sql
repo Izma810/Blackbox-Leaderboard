@@ -20,9 +20,7 @@ INSERT OR IGNORE INTO game_config (id) VALUES (1);
 -- ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS teams (
   id            TEXT    PRIMARY KEY,
-  login_id      TEXT    NOT NULL UNIQUE,
-  passcode_hash TEXT    NOT NULL,
-  passcode_salt TEXT    NOT NULL,
+  token_hash    TEXT    UNIQUE,                 -- SHA-256 of the team's secret token; NULL after a host reset
   name          TEXT    NOT NULL,
   name_lower    TEXT    NOT NULL UNIQUE,
   wallet        INTEGER NOT NULL,
@@ -107,7 +105,6 @@ CREATE TABLE IF NOT EXISTS wallet_transactions (
 -- ─────────────────────────────────────────────
 -- INDEXES
 -- ─────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_teams_login      ON teams(login_id);
 CREATE INDEX IF NOT EXISTS idx_members_team     ON team_members(team_id);
 CREATE INDEX IF NOT EXISTS idx_subs_puzzle      ON submissions(puzzle_id);
 CREATE INDEX IF NOT EXISTS idx_subs_team        ON submissions(team_id);

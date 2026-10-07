@@ -1,16 +1,13 @@
 import { Hono } from 'hono'
 import type { Env } from '../types'
-import { verifyToken } from '../lib/crypto'
-import { SECRET } from './auth'
+import { getTeamIdByToken, bearerToken } from '../db/d1'
 
 const game = new Hono<{ Bindings: Env }>()
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 
-async function getTeamId(c: { req: { header: (h: string) => string | undefined }; env: Env }): Promise<string | null> {
-  const token = (c.req.header('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim()
-  if (!token) return null
-  return verifyToken(token, SECRET(c.env))
+function getTeamId(c: { req: { header: (h: string) => string | undefined }; env: Env }): Promise<string | null> {
+  return getTeamIdByToken(c.env.DB, bearerToken(c.req.header('Authorization')))
 }
 
 // ─── Forward to Durable Object ────────────────────────────────────────────────

@@ -71,8 +71,13 @@ admin.get('/state', async (c) => {
     membersByTeam.get(m.team_id)!.push(m)
   }
 
+  const resetRows = await c.env.DB
+    .prepare('SELECT id FROM teams WHERE token_hash IS NULL').all<{ id: string }>()
+  const awaitingReclaim = new Set(resetRows.results.map((r) => r.id))
+
   const teamsAdmin = teams.map((t) => ({
     ...t,
+    awaitingReclaim: awaitingReclaim.has(t.id),
     membersAdmin: (membersByTeam.get(t.id) ?? []).map((m) => ({
       name: m.name, entryNumber: m.entry_number, hostel: m.hostel, slot: m.slot,
     })),
@@ -170,20 +175,12 @@ admin.delete('/teams/:id', async (c) => {
   return routeToDO(c.env, 'remove-team', { teamId: c.req.param('id') })
 })
 
-admin.post('/teams/:id/reset-passcode', async (c) => {
+// For a team that lost its login on both laptops, or whose link leaked: signs out
+// every laptop holding the old token, then the team claims it back from the home page.
+admin.post('/teams/:id/reset-login', async (c) => {
   const deny = requireAdmin(c.env, c.req.header('Authorization'))
   if (deny) return deny
-
-  const teamId = c.req.param('id')
-  const { generatePasscode, hashPasscode } = await import('../lib/crypto')
-  const passcode = generatePasscode()
-  const { hash, salt } = await hashPasscode(passcode)
-
-  await c.env.DB
-    .prepare('UPDATE teams SET passcode_hash = ?, passcode_salt = ? WHERE id = ?')
-    .bind(hash, salt, teamId).run()
-
-  return c.json({ passcode })
+  return routeToDO(c.env, 'reset-login', { teamId: c.req.param('id') })
 })
 
 export { admin as adminRouter }

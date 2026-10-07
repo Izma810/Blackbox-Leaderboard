@@ -26,7 +26,6 @@ export interface TeamMemberInfo {
 
 export interface TeamInfo {
   id:          string
-  loginId:     string
   name:        string
   members:     TeamMemberInfo[]
   wallet:      number

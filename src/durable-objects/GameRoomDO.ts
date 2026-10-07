@@ -5,6 +5,7 @@ import type {
 import { PUZZLE_MAP, PUZZLES_BY_BATCH, getPuzzleInfo } from '../game/puzzles'
 import { IMAGE_PUZZLE_MAP, IMAGE_PUZZLES_BY_BATCH, getImagePuzzleInfo, ALL_TRANSFORM_NAMES } from '../game/imagePuzzles'
 import type { ImagePuzzleDef } from '../game/imagePuzzles'
+import { answerKey, isCorrectImageAnswer } from '../game/imageEquivalence'
 import { compileFormula, judge, isDuplicatePrediction } from '../game/formula'
 import {
   getConfig, getAllTeams, getTeamById, getBatchById, getSubmissionsForBatch,
@@ -349,11 +350,31 @@ export class GameRoomDO implements DurableObject {
     if (filters.length > puzzle.maxFilters) {
       return jsonRes({ error: `Maximum ${puzzle.maxFilters} filter(s) allowed` }, 400)
     }
+    // The picker only lets a transform be chosen once. Repeats would also let a pipeline
+    // slip past the duplicate check below (e.g. invert twice is the same as nothing).
+    if (new Set(filters).size !== filters.length) {
+      return jsonRes({ error: 'Each transform can be used only once' }, 400)
+    }
 
     const team = await this.ensureTeam(hot, teamId)
     if (!team) return jsonRes({ error: 'Team not found' }, 404)
     if (team.wallet < hot.config.postStake) {
       return jsonRes({ error: `Posting costs ${hot.config.postStake} coins — you have ${team.wallet}` }, 403)
+    }
+
+    // Duplicate check: an answer that gives the same pictures as one already posted is a
+    // duplicate, even if the transforms are listed in a different order.
+    const mine = answerKey(puzzleId, filters)
+    const existing = hot.subsByPuzzle.get(puzzleId) ?? []
+    for (let i = 0; i < existing.length; i++) {
+      let theirs: unknown
+      try { theirs = JSON.parse(existing[i].expr) } catch { continue }
+      if (!Array.isArray(theirs) || answerKey(puzzleId, theirs as string[]) !== mine) continue
+      const who = buildPublicSubmission(existing[i], hot.config.anonymousVoting, i, false).label
+      return jsonRes({
+        error: `${who} already submitted an answer that gives the same result. Back it with an upvote, or try something different.`,
+        duplicateOf: existing[i].id,
+      }, 409)
     }
 
     const subId = await this.recordSubmission(
@@ -595,10 +616,8 @@ export class GameRoomDO implements DurableObject {
         if (imagePuzzle) {
           let submitted: string[]
           try { submitted = JSON.parse(row.expr) } catch { submitted = [] }
-          const correct = imagePuzzle.correctPipeline
-          const isRight = imagePuzzle.isCommutative
-            ? JSON.stringify([...submitted].sort()) === JSON.stringify([...correct].sort())
-            : JSON.stringify(submitted) === JSON.stringify(correct)
+          // Right means the pipeline reproduces the correct pictures, in whatever order.
+          const isRight = isCorrectImageAnswer(imagePuzzle, submitted)
           verdict  = isRight ? 'right' : 'wrong'
           r2       = isRight ? 1 : 0
           accuracy = isRight ? 1 : 0

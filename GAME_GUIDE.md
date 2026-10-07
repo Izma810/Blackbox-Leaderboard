@@ -72,6 +72,8 @@ Available functions: `sin`, `cos`, `tan`, `ln` (natural log), `log2`, `log10`, `
 - The formula is parsed and evaluated client-side as you type — you see a live preview.
 - The server checks that your formula evaluates to finite numbers on all 200 data points.
 - **Duplicate check:** if your formula produces predictions that are statistically equivalent to an existing claim (same shape, even if scaled differently), it is rejected. You are shown whose formula it matches, and you can back it with a vote instead.
+- **Image puzzles work the same way.** An answer that turns the pictures into exactly the same output as one already posted is rejected as a duplicate, even if its transforms are listed in a different order. Each transform can be used only once in an answer.
+- **Image answers are judged by the pictures they produce, not by the order you list the transforms in.** If the correct answer is steps 1, 2, 3 and putting them in another order gives exactly the same output picture (for example, because two of the steps don't affect each other), that order is right too. Orders that give a different picture are wrong.
 
 ### Post Stake
 

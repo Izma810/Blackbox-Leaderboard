@@ -72,3 +72,14 @@ npx tsc --noEmit -p tsconfig.client.json
 ```
 
 `npm run build` runs both and then builds the app.
+
+## Image puzzles: keeping them in step with the CLI
+
+Whether two image answers are the same (duplicates, and which orderings count as right) is decided by what the pipelines do to the pictures. `src/game/imageEquivalence.generated.ts` holds the result, computed by running the CLI's own transforms. **Regenerate it whenever a curated picture, an image transform, or an image puzzle changes in `blackbox-ml-game`:**
+
+```bash
+cd blackbox-ml-game
+uv run python ../scripts/gen_image_equivalence.py
+```
+
+It prints, per puzzle, every ordering it will accept as right, and checks its result against the CLI's `pipeline_commutes`. If you change a picture and skip this, answers can be judged against stale groups.

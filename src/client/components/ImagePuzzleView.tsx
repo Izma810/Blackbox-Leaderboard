@@ -90,6 +90,8 @@ export default function ImagePuzzleView({
   const [selected, setSelected]   = useState<TransformName[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError]         = useState('')
+  /** The existing answer a rejected duplicate matched; scrolled to and flashed. */
+  const [highlightId, setHighlightId] = useState<string | null>(null)
   const [voteError, setVoteError] = useState('')
   const [pendingVote, setPendingVote] = useState<string | null>(null)
 
@@ -146,6 +148,13 @@ export default function ImagePuzzleView({
     setPreview(new ImageData(pixels as any, SIZE, SIZE))
   }, [sources, selected])
 
+  useEffect(() => {
+    if (!highlightId) return
+    document.getElementById(`sub-${highlightId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const t = setTimeout(() => setHighlightId(null), 2500)
+    return () => clearTimeout(t)
+  }, [highlightId])
+
   const toggleFilter = useCallback((name: TransformName) => {
     setSelected((prev) => {
       if (prev.includes(name)) return prev.filter((f) => f !== name)
@@ -171,8 +180,12 @@ export default function ImagePuzzleView({
         method: 'POST',
         body: JSON.stringify({ puzzleId: puzzle.id, expr: JSON.stringify(selected) }),
       })
-      const data = await res.json() as { ok?: boolean; error?: string }
-      if (!res.ok || !data.ok) { setError(data.error ?? 'Submission failed'); return }
+      const data = await res.json() as { ok?: boolean; error?: string; duplicateOf?: string }
+      if (!res.ok || !data.ok) {
+        setError(data.error ?? 'Submission failed')
+        if (data.duplicateOf) setHighlightId(data.duplicateOf)
+        return
+      }
       onSubmitted()
     } catch { setError('Network error. Try again.') }
     finally { setSubmitting(false) }
@@ -338,7 +351,10 @@ export default function ImagePuzzleView({
               const canVote = votingOpen && !isOwn && !myVote && votesLeft > 0 && wallet >= voteStake && !pendingVote
 
               return (
-                <li key={sub.id} className={`rounded-2xl border bg-white p-5 shadow-soft ${isOwn ? 'border-2 border-ink' : 'border-line'}`}>
+                <li key={sub.id} id={`sub-${sub.id}`}
+                  className={`rounded-2xl border bg-white p-5 shadow-soft ${isOwn ? 'border-2 border-ink' : 'border-line'} ${
+                    highlightId === sub.id ? 'animate-flash' : ''
+                  }`}>
                   <div className="mb-3 flex items-center justify-between">
                     <span className="font-semibold">{isOwn ? 'Your team' : sub.label}</span>
                     {sub.verdict && (

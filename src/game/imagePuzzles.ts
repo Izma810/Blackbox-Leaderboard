@@ -28,8 +28,8 @@ export const IMAGE_PUZZLES: ImagePuzzleDef[] = [
   // ── Single transforms ─────────────────────────────────────────────────────
 
   {
-    id:              'rotate_chunks',
-    title:           'Tiled Spin',
+    id:              'puzzle_11',
+    title:           'Puzzle 11',
     description:     DESC,
     batchId:         'image',
     imageNames:      ['lsd', 'checkmate'],
@@ -38,8 +38,8 @@ export const IMAGE_PUZZLES: ImagePuzzleDef[] = [
     maxFilters:      1,
   },
   {
-    id:              'mirror_sum',
-    title:           'Reflection Average',
+    id:              'puzzle_12',
+    title:           'Puzzle 12',
     description:     DESC,
     batchId:         'image',
     imageNames:      ['moon', 'molecule'],
@@ -48,8 +48,8 @@ export const IMAGE_PUZZLES: ImagePuzzleDef[] = [
     maxFilters:      1,
   },
   {
-    id:              'circular_shift',
-    title:           'Rolling Offset',
+    id:              'puzzle_13',
+    title:           'Puzzle 13',
     description:     DESC,
     batchId:         'image',
     imageNames:      ['matrix'],
@@ -58,8 +58,8 @@ export const IMAGE_PUZZLES: ImagePuzzleDef[] = [
     maxFilters:      1,
   },
   {
-    id:              'swap_rgb_rbg',
-    title:           'Channel Swap',
+    id:              'puzzle_14',
+    title:           'Puzzle 14',
     description:     DESC,
     batchId:         'image',
     imageNames:      ['marbles', 'monet'],
@@ -71,8 +71,8 @@ export const IMAGE_PUZZLES: ImagePuzzleDef[] = [
   // ── Pipelines ─────────────────────────────────────────────────────────────
 
   {
-    id:              'ghost_solarise',
-    title:           'Ghostly Threshold',
+    id:              'puzzle_15',
+    title:           'Puzzle 15',
     description:     DESC + ' Two transforms were applied. Order matters here.',
     batchId:         'image',
     imageNames:      ['matrix'],
@@ -81,8 +81,8 @@ export const IMAGE_PUZZLES: ImagePuzzleDef[] = [
     maxFilters:      2,
   },
   {
-    id:              'stretch_poster_bgr',
-    title:           'Stretched Pop-Art',
+    id:              'puzzle_16',
+    title:           'Puzzle 16',
     description:     DESC + ' Three transforms were applied. The order does not matter for these three.',
     batchId:         'image',
     imageNames:      ['doctor_strange'],
@@ -91,8 +91,8 @@ export const IMAGE_PUZZLES: ImagePuzzleDef[] = [
     maxFilters:      3,
   },
   {
-    id:              'invert_shift_chunks',
-    title:           'Inverted Scramble',
+    id:              'puzzle_17',
+    title:           'Puzzle 17',
     description:     DESC + ' Three transforms were applied. Order matters.',
     batchId:         'image',
     imageNames:      ['pexels'],
